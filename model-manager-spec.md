@@ -3,7 +3,7 @@
 Working name: TBD. Independent metadata authority and organization layer for a local model
 library.
 
-Status: not started. Architecture settled; no code written.
+Status: **Phase 0 implemented** (see `docs/phase0.md`). Phases 1–5 not started.
 Revised 2026-07-27 following design review.
 
 > **What changed from v1.** Two things invalidated parts of the original spec. First, the app
@@ -690,4 +690,27 @@ v1 left these open. All are now settled.
    both migration cost and whether reflinks are the presentation mechanism.
 2. Confirm where each SD tool runs relative to the array, since the answer selects the default
    link strategy.
-3. Build Phase 0 — Go scanner writing SQLite, raw uninterpreted facts only.
+3. ~~Build Phase 0 — Go scanner writing SQLite, raw uninterpreted facts only.~~ **Done.**
+   `mm scan / report / verify / bench`; see `docs/phase0.md`.
+4. Run Phase 0 against the real array during a migration quiet window, then follow the
+   verification procedure in `docs/phase0.md`. Its output — the distinct-model count and the
+   size distribution — is the input §16.3 says to size the SSD tier from, and the gate on
+   everything in Phase 1.
+
+### 19.1 Implementation notes from Phase 0
+
+Two refinements to §6's data model, both recorded in `internal/store/schema.go`:
+
+- **`device` and `inode` are on the path row, not the file row.** §6.1 lists them on the model
+  file, but they are per-instance facts — one hash has many paths, each with its own inode —
+  and the path row is the only place the §10.1 cache can key on them.
+- **`probe_sha256` is a stored, indexed column** on `model_file`. §10.1 describes the probe as
+  a comparison without saying where the value lives. An ambiguous probe — two distinct hashes
+  sharing a size and a sample — resolves to a full hash rather than to whichever row came back
+  first.
+
+One thing §2.1's table understates: **GGUF v1 also yields a NULL `weights_sha256`.** It used a
+32-bit layout, and walking it with the v2/v3 reader produces a plausible but wrong data offset.
+A wrong rebinding key is worse than no key, so v1 is declined rather than guessed at. The same
+applies to any file whose framing fails to parse, and to a weights region of zero length —
+whose hash would otherwise be the digest of the empty string, identical across every such file.
