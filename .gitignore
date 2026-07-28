@@ -1,0 +1,14 @@
+# Build output
+/bin/
+/dist/
+/mm
+/mm.exe
+
+# Local databases and scan artifacts
+*.db
+*.db-wal
+*.db-shm
+
+# Editor / OS
+.DS_Store
+*.swp
