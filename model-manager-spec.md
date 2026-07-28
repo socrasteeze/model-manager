@@ -70,14 +70,24 @@ Content-addressing assumes the file is immutable. It is not always: **some tools
 safetensors metadata header in place.** Identical weights, different SHA256, record silently
 orphaned.
 
-**Mitigation: compute a second weights-region hash in the same streaming pass.** The
-safetensors layout is `8-byte LE header length → JSON header → tensor bytes`; hash from the
-end of the header onward. Store both.
+**Mitigation: compute a second weights-region hash in the same streaming pass.** Store both.
 
 - `sha256` remains the primary key and the Civitai lookup key.
 - `weights_sha256` is the stable rebinding key when a header is rewritten.
 
 Cost is one extra hash context over bytes already in memory — effectively free.
+
+**The weights region is defined per format**, because the layouts differ:
+
+| Format | Weights region | `weights_sha256` |
+|---|---|---|
+| safetensors | `8-byte LE header length → JSON header → tensor bytes`. Hash from the end of the header onward. | Populated |
+| GGUF | Offset is computable from the header (magic, version, tensor/KV counts, KV pairs, tensor infos, then aligned tensor data). Hash from the aligned data offset onward. | Populated |
+| `.ckpt`, `.pt` | Undeterminable without deserializing, which is forbidden (§10.4). | **NULL** |
+
+**Rebinding logic must treat NULL as "no rebinding key available for this file"**, not as a
+populated column. Assuming otherwise means the recovery path misbehaves on precisely the
+formats least able to recover by other means.
 
 ---
 
@@ -195,7 +205,8 @@ phone and iPad browsing is a primary use case rather than an afterthought.
 ### 6.1 Model file
 
 - `sha256` (PK)
-- `weights_sha256` — tensor-region hash; survives header rewrites (§2.1)
+- `weights_sha256` — tensor-region hash; survives header rewrites. **Nullable** — see §2.1
+  for which formats populate it
 - `size`, `mtime`
 - `device`, `inode` — cache key and same-file detection
 - `format` — safetensors / ckpt / gguf / pt
@@ -214,6 +225,7 @@ Promoted to its own table:
 - `path`
 - `first_seen`, `last_seen`
 - `present` (bool)
+- `provisional` (bool) — bound by sampled probe, not yet confirmed by full hash (§10.1)
 - `scan_run_id`
 
 Paths not observed in the latest completed scan of their root get `present = false` rather
@@ -373,6 +385,15 @@ exists to avoid. A move *within* the btrfs array preserves the inode, so it cost
 Second-tier fallback for cross-volume copies (new inode, preserved mtime): probe
 `(size, hash of first 1MB + last 1MB)` before committing to a full read.
 
+**A probe match never confers identity.** A sampled hash over a multi-GB file is a far weaker
+guarantee than a full one, and a false positive in a content-addressed system assigns a wrong
+identity *permanently* — the exact class of failure this design exists to eliminate.
+
+A probe match therefore binds the path as **provisional only**, flagged on the path row and
+confirmed by a full hash on the next verification pass. Provisional paths are usable for
+browsing, but are **never** the basis for projection, dedup reporting, tiering, or any
+write-side decision until confirmed.
+
 ### 10.2 Scan safety during migration
 
 Phase 0 hashes 7.5TB while FreeFileSync is still moving files. A file copied into place
@@ -425,8 +446,11 @@ to close now and painful to retrofit once third-party front-ends depend on the A
 - **Strict `Host` header allowlist.** Reject requests whose Host is not loopback or a
   configured hostname. This is the standard DNS-rebinding defense.
 - **No CORS wildcard.** Explicit origin allowlist only.
-- **Generated bearer token required whenever bound to a non-loopback interface.** Written to a
-  file with restrictive permissions; the bundled UI reads it locally.
+- **Generated bearer token required whenever bound to a non-loopback interface.** The daemon
+  **injects the token into the UI it serves** — same-origin, so no file access is involved.
+  The token is *also* written to a file with restrictive permissions, but that copy exists for
+  **third-party clients and CLI**, not for the bundled UI. A browser cannot read a file off
+  disk; any design that assumes it can is unimplementable.
 
 Tailnet binding may exempt the token, since the tailnet is already authenticated. The public
 build may not.
@@ -490,7 +514,12 @@ Hard fences. Violating any of these turns a finishable project into an unfinisha
 - **Does not generate images.** Not a frontend. ComfyUI and Swarm already do this.
 - **Never modifies, moves, renames, or deletes an existing file.** The app creates new files
   only at explicitly user-chosen destinations, and only ever sidecar/preview files, view
-  entries, or freshly downloaded models. **It never opens a model file for writing.**
+  entries, tier copies (§16.3), or freshly downloaded models. **It never opens a model file
+  for writing.**
+
+  > This enumeration is exhaustive by design and must be re-checked whenever a phase
+  > introduces a new write target — v1's fence contradicted its own Phases 3 and 4 precisely
+  > because it was not.
 - **Writes nothing into the model tree at all before the index is verified.** Phases 0 and 1
   are strictly read-only outside the app's own database.
 - **Does not dedupe by deleting.** Reports duplicate hashes, surfaces them, lets you act
