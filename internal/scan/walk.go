@@ -107,6 +107,45 @@ func walkRoot(ctx context.Context, root string, onError func(path, kind string, 
 	return out, err
 }
 
+// FileRef is one model file found by a walk.
+type FileRef struct {
+	Path   string
+	Root   string
+	Device uint64
+	Inode  uint64
+	Size   int64
+}
+
+// ListFiles walks roots and reports the model files found, touching no database.
+// It backs the hashing-concurrency benchmark, which has to measure the disk
+// without also measuring SQLite.
+func ListFiles(ctx context.Context, roots []string) ([]FileRef, error) {
+	prepared, err := prepareRoots(roots)
+	if err != nil {
+		return nil, err
+	}
+	var out []FileRef
+	for _, root := range prepared {
+		found, err := walkRoot(ctx, root, func(string, string, error) {})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+		for _, c := range found {
+			out = append(out, FileRef{
+				Path:   c.path,
+				Root:   c.root,
+				Device: c.device,
+				Inode:  c.inode,
+				Size:   c.size,
+			})
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return out, nil
+}
+
 // prepareRoots cleans, absolutizes, deduplicates and validates the root list.
 //
 // Nested roots are rejected rather than silently merged. The present-sweep is

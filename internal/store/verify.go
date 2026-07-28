@@ -1,0 +1,129 @@
+package store
+
+import (
+	"fmt"
+)
+
+// Operations used by verification. They deliberately do not touch scan_run:
+// verification is not a scan, and attributing its writes to a scan run would
+// make the per-root sweep and the report's run summary lie about what happened.
+
+// ListPathsForVerify returns present paths to re-hash, in random order so a
+// sample is a sample rather than the first N of a directory walk.
+//
+// limit <= 0 means every matching path.
+func (s *Store) ListPathsForVerify(provisionalOnly bool, limit int) ([]FilePath, error) {
+	query := `
+        SELECT id, sha256, path, root, device, inode, size, mtime_ns, provisional
+          FROM model_file_path
+         WHERE present = 1`
+	if provisionalOnly {
+		query += ` AND provisional = 1`
+	}
+	query += ` ORDER BY RANDOM()`
+
+	args := []any{}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing paths for verification: %w", err)
+	}
+	defer rows.Close()
+
+	var out []FilePath
+	for rows.Next() {
+		var p FilePath
+		var device, inode int64
+		var provisional int64
+		if err := rows.Scan(&p.ID, &p.SHA256, &p.Path, &p.Root,
+			&device, &inode, &p.Size, &p.MtimeNs, &provisional); err != nil {
+			return nil, err
+		}
+		p.Device = uint64(device)
+		p.Inode = uint64(inode)
+		p.Provisional = provisional == 1
+		p.Present = true
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// UpsertFile records content facts without touching any path.
+func (s *Store) UpsertFile(f ModelFile) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	now := nowUTC()
+
+	var weightsSHA, weightsOff, headerBlob, headerOff any
+	if f.WeightsSHA256 != "" {
+		weightsSHA = f.WeightsSHA256
+		weightsOff = f.WeightsOffset
+	}
+	if f.HeaderBlob != nil {
+		headerBlob = f.HeaderBlob
+		headerOff = f.HeaderOffset
+	}
+
+	_, err := s.db.Exec(`
+        INSERT INTO model_file (
+            sha256, weights_sha256, weights_offset, probe_sha256, size, format,
+            header_blob, header_offset, header_truncated, first_seen, last_verified
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(sha256) DO UPDATE SET
+            weights_sha256   = COALESCE(excluded.weights_sha256, model_file.weights_sha256),
+            weights_offset   = COALESCE(excluded.weights_offset, model_file.weights_offset),
+            probe_sha256     = excluded.probe_sha256,
+            format           = excluded.format,
+            header_blob      = COALESCE(excluded.header_blob, model_file.header_blob),
+            header_offset    = COALESCE(excluded.header_offset, model_file.header_offset),
+            header_truncated = excluded.header_truncated,
+            last_verified    = excluded.last_verified`,
+		f.SHA256, weightsSHA, weightsOff, f.ProbeSHA256, f.Size, f.Format,
+		headerBlob, headerOff, boolInt(f.HeaderTruncated), now, now)
+	if err != nil {
+		return fmt.Errorf("store: upsert model_file %s: %w", f.SHA256, err)
+	}
+	return nil
+}
+
+// RebindPath points a path row at the hash a full read just proved it holds and
+// clears the provisional flag.
+//
+// This is the operation that resolves a sampled-probe guess. If the guess was
+// wrong, the wrong binding is corrected here rather than persisting -- which is
+// the entire reason provisional bindings are barred from write-side decisions
+// until this runs (spec §10.1).
+func (s *Store) RebindPath(id int64, sha string, size, mtimeNs int64) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	_, err := s.db.Exec(`
+        UPDATE model_file_path
+           SET sha256 = ?, size = ?, mtime_ns = ?, provisional = 0,
+               present = 1, last_seen = ?
+         WHERE id = ?`,
+		sha, size, mtimeNs, nowUTC(), id)
+	if err != nil {
+		return fmt.Errorf("store: rebinding path %d: %w", id, err)
+	}
+	return nil
+}
+
+// SetPathAbsent marks a single path as no longer present, for a file that
+// disappeared between the scan and the verification.
+func (s *Store) SetPathAbsent(id int64) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	_, err := s.db.Exec(
+		`UPDATE model_file_path SET present = 0 WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("store: marking path %d absent: %w", id, err)
+	}
+	return nil
+}
