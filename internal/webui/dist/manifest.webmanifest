@@ -1,0 +1,18 @@
+{
+  "name": "Model Manager",
+  "short_name": "Models",
+  "description": "Content-addressed metadata for a local AI model library",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#11131a",
+  "theme_color": "#11131a",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

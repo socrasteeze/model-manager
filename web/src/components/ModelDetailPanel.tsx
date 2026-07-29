@@ -1,0 +1,412 @@
+import { useCallback, useEffect, useState } from 'react'
+import {
+  acceptSuggestion,
+  config,
+  dismissSuggestion,
+  formatBytes,
+  getCandidates,
+  getModel,
+  previewURL,
+  setTags,
+  updateModel,
+  type CandidateView,
+  type ModelDetail,
+} from '../api'
+import { CopyButton } from './CopyButton'
+import { EditableField } from './EditableField'
+
+interface Props {
+  sha: string
+  onClose: () => void
+  onChanged: () => void
+}
+
+export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
+  const [detail, setDetail] = useState<ModelDetail | null>(null)
+  const [candidates, setCandidates] = useState<CandidateView[] | null>(null)
+  const [showProvenance, setShowProvenance] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(() => {
+    getModel(sha).then(setDetail).catch((e: Error) => setError(e.message))
+  }, [sha])
+
+  useEffect(() => {
+    setDetail(null)
+    setCandidates(null)
+    setShowProvenance(false)
+    setError(null)
+    load()
+  }, [sha, load])
+
+  useEffect(() => {
+    if (!showProvenance || candidates) return
+    getCandidates(sha).then(setCandidates).catch(() => setCandidates([]))
+  }, [showProvenance, candidates, sha])
+
+  // Escape closes the panel. On a phone this is the back gesture's job, but on a
+  // desktop it is the thing everyone reaches for first.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const save = async (field: string, value: unknown) => {
+    setBusy(true)
+    try {
+      await updateModel(sha, { [field]: value })
+      load()
+      onChanged()
+      setError(null)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (error && !detail) {
+    return (
+      <aside className="detail">
+        <button className="close" onClick={onClose} aria-label="Close">×</button>
+        <div className="error">{error}</div>
+      </aside>
+    )
+  }
+
+  if (!detail) {
+    return (
+      <aside className="detail">
+        <button className="close" onClick={onClose} aria-label="Close">×</button>
+        <div className="loading">Loading…</div>
+      </aside>
+    )
+  }
+
+  const rec = detail.record
+  const editable = !config.readOnly
+  const title = rec?.name || detail.paths[0]?.Path.split(/[/\\]/).pop() || sha.slice(0, 12)
+
+  return (
+    <aside className="detail">
+      <button className="close" onClick={onClose} aria-label="Close">×</button>
+
+      {detail.previews.length > 0 && (
+        <div className="detail-previews">
+          {detail.previews.map((p) => (
+            <img key={p.id} src={previewURL(p.image_sha256)} alt="" loading="lazy" />
+          ))}
+        </div>
+      )}
+
+      <h2>{title}</h2>
+
+      {error && <div className="error inline">{error}</div>}
+
+      {detail.suggestions.length > 0 && (
+        <section className="suggestions">
+          <h3>Pending suggestions</h3>
+          {/* Manual values are never overwritten by ingest, but a manual value
+              that is simply wrong would otherwise be invisible and permanent. */}
+          {detail.suggestions.map((s) => (
+            <div key={s.id} className="suggestion">
+              <div>
+                <strong>{s.field}</strong> — {s.source} says{' '}
+                <code>{trimJSON(s.suggested_value)}</code>, yours is{' '}
+                <code>{trimJSON(s.manual_value)}</code>
+              </div>
+              {editable && (
+                <div className="suggestion-actions">
+                  <button
+                    disabled={busy}
+                    onClick={async () => {
+                      setBusy(true)
+                      try {
+                        await acceptSuggestion(s.id)
+                        load()
+                        onChanged()
+                      } finally {
+                        setBusy(false)
+                      }
+                    }}
+                  >
+                    Accept
+                  </button>
+                  <button
+                    disabled={busy}
+                    onClick={async () => {
+                      setBusy(true)
+                      try {
+                        await dismissSuggestion(s.id)
+                        load()
+                      } finally {
+                        setBusy(false)
+                      }
+                    }}
+                  >
+                    Keep mine
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </section>
+      )}
+
+      {rec?.trigger_words && rec.trigger_words.length > 0 && (
+        <section className="triggers">
+          <h3>Trigger words</h3>
+          {/* Use case 5: looking these up on a phone while generating from the
+              couch. One tap to copy is the entire interaction. */}
+          <div className="trigger-list">
+            {rec.trigger_words.map((w) => (
+              <CopyButton key={w} value={w} className="trigger" />
+            ))}
+          </div>
+          {rec.trigger_words.length > 1 && (
+            <CopyButton value={rec.trigger_words.join(', ')} label="Copy all" className="copy-all" />
+          )}
+        </section>
+      )}
+
+      <section className="fields">
+        <EditableField label="Name" value={rec?.name} editable={editable} onSave={(v) => save('name', v)} />
+        <EditableField
+          label="Type"
+          value={rec?.type}
+          editable={editable}
+          options={['checkpoint', 'lora', 'lycoris', 'vae', 'embedding', 'controlnet', 'upscaler']}
+          onSave={(v) => save('type', v)}
+        />
+        <EditableField
+          label="Base model"
+          value={rec?.base_model}
+          editable={editable}
+          onSave={(v) => save('base_model', v)}
+        />
+        <EditableField label="Version" value={rec?.version} editable={editable} onSave={(v) => save('version', v)} />
+        <EditableField
+          label="Recommended weight"
+          value={rec?.recommended_weight?.toString()}
+          editable={editable}
+          onSave={(v) => save('recommended_weight', v === null ? null : Number(v))}
+        />
+        <EditableField
+          label="Trigger words"
+          value={rec?.trigger_words?.join(', ')}
+          editable={editable}
+          onSave={(v) => save('trigger_words', v === null ? null : String(v).split(',').map((s) => s.trim()).filter(Boolean))}
+        />
+        <EditableField
+          label="Description"
+          value={rec?.description}
+          editable={editable}
+          multiline
+          onSave={(v) => save('description', v)}
+        />
+        <Row label="Origin" value={rec?.origin} />
+      </section>
+
+      <section className="tags-section">
+        <h3>Tags</h3>
+        <TagEditor
+          sha={sha}
+          tags={detail.tags}
+          editable={editable}
+          onSaved={() => {
+            load()
+            onChanged()
+          }}
+        />
+      </section>
+
+      {detail.training && (
+        <section className="training">
+          <h3>Training</h3>
+          <Row label="Trainer" value={detail.training.trainer} />
+          <Row label="Base" value={detail.training.base} />
+          <Row label="Dataset" value={detail.training.dataset} />
+          <Row
+            label="Dataset size"
+            value={detail.training.dataset_size ? `${detail.training.dataset_size} images` : undefined}
+          />
+          <Row label="Run date" value={detail.training.run_date?.slice(0, 10)} />
+          {detail.training.notes && <Row label="Notes" value={detail.training.notes} />}
+          {detail.training.config && (
+            <div className="config-grid">
+              {Object.entries(detail.training.config).map(([k, v]) => (
+                <div key={k} className="config-item">
+                  <span>{k}</span>
+                  <code>{String(v)}</code>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="source-note">from {detail.training.source.replace(/_/g, ' ')}</p>
+        </section>
+      )}
+
+      <section className="files">
+        <h3>Files</h3>
+        {detail.paths.map((p) => (
+          <div key={p.ID} className={`path${p.Present ? '' : ' absent'}`}>
+            <code>{p.Path}</code>
+            <div className="path-badges">
+              {!p.Present && <span className="badge absent-badge">not on disk</span>}
+              {p.Provisional && (
+                <span className="badge warn-badge" title="Bound by sampled probe; run mm verify --provisional to confirm">
+                  provisional
+                </span>
+              )}
+            </div>
+          </div>
+        ))}
+      </section>
+
+      <section className="identity">
+        <h3>Identity</h3>
+        <div className="hash-row">
+          <span>SHA256</span>
+          <CopyButton value={detail.sha256} label={short(detail.sha256)} className="hash" />
+        </div>
+        {detail.weights_sha256 ? (
+          <div className="hash-row">
+            <span title="Survives a tool rewriting the header in place">Weights</span>
+            <CopyButton value={detail.weights_sha256} label={short(detail.weights_sha256)} className="hash" />
+          </div>
+        ) : (
+          <p className="source-note">
+            No weights hash: {detail.format === 'ckpt' || detail.format === 'pt'
+              ? 'pickle formats are never parsed, so the tensor region cannot be located'
+              : 'the format header did not parse'}
+            .
+          </p>
+        )}
+        <Row label="Size" value={formatBytes(detail.size)} />
+        <Row label="Format" value={detail.format} />
+        <Row label="First seen" value={detail.first_seen?.slice(0, 10)} />
+      </section>
+
+      <section className="provenance">
+        <button className="link" onClick={() => setShowProvenance((v) => !v)}>
+          {showProvenance ? 'Hide' : 'Show'} where each value came from
+        </button>
+        {showProvenance && candidates && (
+          <div className="candidates">
+            {candidates.length === 0 && <p className="source-note">No recorded sources.</p>}
+            {candidates.map((c) => (
+              <div key={c.field} className="candidate">
+                <div className="candidate-field">{c.field}</div>
+                <div className="candidate-entry winner">
+                  <span className={`tier tier-${c.winner.tier_name}`}>{c.winner.tier_name}</span>
+                  <code>{JSON.stringify(c.winner.value)}</code>
+                  <span className="src">{c.winner.source}</span>
+                </div>
+                {c.losers?.map((l, i) => (
+                  <div key={i} className="candidate-entry loser">
+                    <span className={`tier tier-${l.tier_name}`}>{l.tier_name}</span>
+                    <code>{JSON.stringify(l.value)}</code>
+                    <span className="src">{l.source}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </aside>
+  )
+}
+
+function Row({ label, value }: { label: string; value?: string }) {
+  if (!value) return null
+  return (
+    <div className="row">
+      <span className="row-label">{label}</span>
+      <span className="row-value">{value}</span>
+    </div>
+  )
+}
+
+function TagEditor({
+  sha,
+  tags,
+  editable,
+  onSaved,
+}: {
+  sha: string
+  tags: string[]
+  editable: boolean
+  onSaved: () => void
+}) {
+  const [draft, setDraft] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const commit = async (next: string[]) => {
+    setBusy(true)
+    try {
+      await setTags(sha, next)
+      onSaved()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="tag-editor">
+      <div className="tag-list">
+        {tags.length === 0 && <span className="source-note">none</span>}
+        {tags.map((t) => (
+          <span key={t} className="tag">
+            {t}
+            {editable && (
+              <button
+                disabled={busy}
+                onClick={() => commit(tags.filter((x) => x !== t))}
+                aria-label={`Remove ${t}`}
+              >
+                ×
+              </button>
+            )}
+          </span>
+        ))}
+      </div>
+      {editable && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            const value = draft.trim()
+            if (!value || tags.includes(value)) return
+            setDraft('')
+            commit([...tags, value])
+          }}
+        >
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Add tag…"
+            disabled={busy}
+          />
+        </form>
+      )}
+    </div>
+  )
+}
+
+function short(hash: string): string {
+  return `${hash.slice(0, 8)}…${hash.slice(-6)}`
+}
+
+function trimJSON(encoded: string): string {
+  try {
+    const v = JSON.parse(encoded)
+    const s = Array.isArray(v) ? v.join(', ') : String(v)
+    return s.length > 60 ? `${s.slice(0, 57)}…` : s
+  } catch {
+    return encoded
+  }
+}

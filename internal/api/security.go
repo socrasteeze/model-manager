@@ -138,9 +138,18 @@ func isLoopbackName(host string) bool {
 }
 
 // checkOrigin applies the CORS allowlist.
-func (s *Security) checkOrigin(origin string) bool {
+//
+// Same-origin requests are always permitted. Browsers send an Origin header on
+// plenty of same-origin requests -- any element carrying `crossorigin`, which is
+// what Vite emits for its own module scripts and stylesheets -- so treating the
+// presence of Origin as evidence of cross-origin would reject the UI's own
+// assets. The allowlist exists to gate *other* origins.
+func (s *Security) checkOrigin(origin string, r *http.Request) bool {
 	if origin == "" {
 		return false
+	}
+	if sameOrigin(origin, r) {
+		return true
 	}
 	for _, allowed := range s.AllowedOrigins {
 		if strings.EqualFold(strings.TrimSpace(allowed), origin) {
@@ -148,6 +157,20 @@ func (s *Security) checkOrigin(origin string) bool {
 		}
 	}
 	return false
+}
+
+// sameOrigin compares the Origin header's authority against the request's Host.
+//
+// The scheme is deliberately not compared: this daemon speaks plain HTTP, and a
+// browser reaching it over http:// sends an http:// origin, so requiring a
+// scheme match would be comparing a constant against itself. The authority is
+// the part that decides whether this is the page we served.
+func sameOrigin(origin string, r *http.Request) bool {
+	authority := origin
+	if i := strings.Index(authority, "://"); i >= 0 {
+		authority = authority[i+3:]
+	}
+	return strings.EqualFold(authority, r.Host)
 }
 
 // authorized reports whether a request may proceed.
@@ -214,7 +237,7 @@ func (s *Security) middleware(next http.Handler) http.Handler {
 		}
 
 		if origin := r.Header.Get("Origin"); origin != "" {
-			if !s.checkOrigin(origin) {
+			if !s.checkOrigin(origin, r) {
 				// No wildcard, ever. Omitting the header entirely is what makes
 				// the browser refuse the response.
 				http.Error(w, "Origin not allowed", http.StatusForbidden)

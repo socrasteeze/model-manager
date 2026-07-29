@@ -12,3 +12,7 @@
 # Editor / OS
 .DS_Store
 *.swp
+
+# UI dependencies. The *built* output under internal/webui/dist is committed on
+# purpose: a distributable binary has to build without a Node toolchain.
+web/node_modules/

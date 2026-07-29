@@ -105,7 +105,15 @@ func matchBaseModel(s string) string {
 	return ""
 }
 
-var versionSuffix = regexp.MustCompile(`(?i)[-_. ]v?\d+(\.\d+)*$`)
+// versionSuffix matches a trailing version marker, but deliberately not a bare
+// single digit.
+//
+// Real libraries are full of `thing_1.safetensors` and `ckpt_0.safetensors`
+// where the trailing number is an index or a shard, not a version. Reporting "0"
+// as a version is worse than reporting nothing, because it looks like real
+// metadata. So a version must either carry a `v` prefix or have a dotted or
+// multi-digit form.
+var versionSuffix = regexp.MustCompile(`(?i)[-_. ](v\d+(\.\d+)*|\d+\.\d+(\.\d+)*|\d{2,})$`)
 
 // prettifyFilename turns a filename into something readable enough to be worth
 // showing before any real metadata exists.

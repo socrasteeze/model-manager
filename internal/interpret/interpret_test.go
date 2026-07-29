@@ -353,9 +353,16 @@ func TestVersionFromFilename(t *testing.T) {
 	cases := map[string]string{
 		"/m/style_v2.safetensors":        "v2",
 		"/m/style-v1.5.safetensors":      "v1.5",
-		"/m/style 3.safetensors":         "3",
+		"/m/style_1.2.3.safetensors":     "1.2.3",
+		"/m/style_v10.safetensors":       "v10",
 		"/m/style.safetensors":           "",
 		"/m/no-version-here.safetensors": "",
+		// A bare trailing digit is an index or a shard, not a version. Real
+		// libraries are full of these, and reporting "0" as a version is worse
+		// than reporting nothing because it looks like real metadata.
+		"/m/ckpt_0.safetensors":  "",
+		"/m/thing_1.safetensors": "",
+		"/m/style 3.safetensors": "",
 	}
 	for path, want := range cases {
 		if got := VersionFromFilename(path); got != want {
