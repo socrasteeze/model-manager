@@ -127,3 +127,36 @@ func (s *Store) SetPathAbsent(id int64) error {
 	}
 	return nil
 }
+
+// PresentPaths lists every path currently on disk, for passes that need to look
+// beside model files -- sidecar ingest especially.
+//
+// Absent paths are excluded deliberately: a sidecar beside a path that is gone
+// describes a file the index has already established is not there, and ingesting
+// it would resurrect claims about it.
+func (s *Store) PresentPaths() ([]FilePath, error) {
+	rows, err := s.db.Query(`
+        SELECT id, sha256, path, root, device, inode, size, mtime_ns, provisional
+          FROM model_file_path
+         WHERE present = 1
+         ORDER BY path`)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing present paths: %w", err)
+	}
+	defer rows.Close()
+
+	var out []FilePath
+	for rows.Next() {
+		var p FilePath
+		var device, inode, provisional int64
+		if err := rows.Scan(&p.ID, &p.SHA256, &p.Path, &p.Root,
+			&device, &inode, &p.Size, &p.MtimeNs, &provisional); err != nil {
+			return nil, err
+		}
+		p.Device, p.Inode = uint64(device), uint64(inode)
+		p.Provisional = provisional == 1
+		p.Present = true
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}

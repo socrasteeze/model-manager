@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/bench"
+	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/ingest"
 	"github.com/socrasteeze/model-manager/internal/interpret"
 	"github.com/socrasteeze/model-manager/internal/report"
 	"github.com/socrasteeze/model-manager/internal/scan"
@@ -43,6 +45,7 @@ USAGE
 COMMANDS
     scan       Walk model roots and record what is there
     interpret  Turn stored headers into typed metadata (reads no model files)
+    ingest     Read other tools' sidecars beside model files (read-only)
     report     Summarize the index: distinct models, duplication, size spread
     verify     Re-read files and check the index against the disk
     bench      Compare hashing throughput at different worker counts
@@ -66,6 +69,8 @@ func main() {
 		err = cmdScan(ctx, os.Args[2:])
 	case "interpret":
 		err = cmdInterpret(ctx, os.Args[2:])
+	case "ingest":
+		err = cmdIngest(ctx, os.Args[2:])
 	case "report":
 		err = cmdReport(os.Args[2:])
 	case "verify":
@@ -256,6 +261,68 @@ Manual values are never touched.`)
 	}
 	fmt.Println(stats.Summary())
 	return nil
+}
+
+// --- ingest ------------------------------------------------------------------
+
+func cmdIngest(ctx context.Context, args []string) error {
+	fs := newFlagSet("ingest", `mm ingest
+
+Reads the sidecars other tools have written beside model files -- Stability
+Matrix, SwarmUI, ComfyUI's LoRA Manager, A1111 and Forge -- and merges what they
+say into master.
+
+Strictly read-only. Nothing is written into the model tree, and none of it is
+treated as authoritative: every one of those files is bound to its model by path
+and filename, which is the positional binding this project exists to replace. A
+later Civitai lookup by hash supersedes all of it.
+
+Preview images are copied into a content-addressed store beside the database, so
+they survive the model being moved.`)
+
+	dbPath := fs.String("db", defaultDBPath(), "path to the master database")
+	skipPreviews := fs.Bool("no-previews", false, "ignore preview images")
+	blobDir := fs.String("blobs", "", "preview blob directory (default: alongside the database)")
+	allowNetDB := fs.Bool("allow-network-db", false, "permit a database on a network filesystem")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	st, err := openStore(*dbPath, *allowNetDB)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	opts := ingest.Options{
+		SkipPreviews: *skipPreviews,
+		Logf:         func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
+	}
+	if !*skipPreviews {
+		dir := *blobDir
+		if dir == "" {
+			dir = defaultBlobDir(st.Path())
+		}
+		blobs, err := blobstore.New(dir)
+		if err != nil {
+			return err
+		}
+		opts.Blobs = blobs
+	}
+
+	stats, err := ingest.Run(ctx, st, opts)
+	if err != nil {
+		return err
+	}
+	fmt.Println(stats.Summary())
+	return nil
+}
+
+// defaultBlobDir keeps previews beside the database but outside it, so the
+// database stays small enough to copy (spec §16.4).
+func defaultBlobDir(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), "blobs")
 }
 
 // --- report ------------------------------------------------------------------
