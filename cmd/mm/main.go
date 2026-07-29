@@ -50,6 +50,8 @@ COMMANDS
     scan       Walk model roots and record what is there
     interpret  Turn stored headers into typed metadata (reads no model files)
     ingest     Read other tools' sidecars beside model files (read-only)
+    enrich     Look models up on Civitai by hash and archive the result
+    get        Download a model from a URL, resumable and verified
     detect     Find installed SD tools and their model roots
     reindex    Rebuild the search index and re-resolve every record
     report     Summarize the index: distinct models, duplication, size spread
@@ -79,6 +81,10 @@ func main() {
 		err = cmdInterpret(ctx, os.Args[2:])
 	case "ingest":
 		err = cmdIngest(ctx, os.Args[2:])
+	case "enrich":
+		err = cmdEnrich(ctx, os.Args[2:])
+	case "get":
+		err = cmdGet(ctx, os.Args[2:])
 	case "detect":
 		err = cmdDetect(os.Args[2:])
 	case "reindex":
