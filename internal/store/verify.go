@@ -160,3 +160,68 @@ func (s *Store) PresentPaths() ([]FilePath, error) {
 	}
 	return out, rows.Err()
 }
+
+// PathsFor lists every known location of one model, present or not.
+func (s *Store) PathsFor(sha string) ([]FilePath, error) {
+	rows, err := s.db.Query(`
+        SELECT id, sha256, path, root, device, inode, size, mtime_ns, present, provisional
+          FROM model_file_path WHERE sha256 = ?
+         ORDER BY present DESC, path`, sha)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing paths for %s: %w", sha, err)
+	}
+	defer rows.Close()
+
+	out := []FilePath{}
+	for rows.Next() {
+		var p FilePath
+		var device, inode, present, provisional int64
+		if err := rows.Scan(&p.ID, &p.SHA256, &p.Path, &p.Root,
+			&device, &inode, &p.Size, &p.MtimeNs, &present, &provisional); err != nil {
+			return nil, err
+		}
+		p.Device, p.Inode = uint64(device), uint64(inode)
+		p.Present, p.Provisional = present == 1, provisional == 1
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ScanRunSummary is one recorded scan.
+type ScanRunSummary struct {
+	ID          int64  `json:"scan_run_id"`
+	Root        string `json:"root"`
+	Status      string `json:"status"`
+	StartedAt   string `json:"started_at"`
+	FinishedAt  string `json:"finished_at,omitempty"`
+	FilesSeen   int64  `json:"files_seen"`
+	FilesHashed int64  `json:"files_hashed"`
+	FilesCached int64  `json:"files_cached"`
+	Errors      int64  `json:"errors"`
+}
+
+// RecentScanRuns lists scans newest first.
+func (s *Store) RecentScanRuns(limit int) ([]ScanRunSummary, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+        SELECT scan_run_id, root, status, started_at, COALESCE(finished_at, ''),
+               files_seen, files_hashed, files_cached, errors
+          FROM scan_run ORDER BY scan_run_id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing scan runs: %w", err)
+	}
+	defer rows.Close()
+
+	out := []ScanRunSummary{}
+	for rows.Next() {
+		var r ScanRunSummary
+		if err := rows.Scan(&r.ID, &r.Root, &r.Status, &r.StartedAt, &r.FinishedAt,
+			&r.FilesSeen, &r.FilesHashed, &r.FilesCached, &r.Errors); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

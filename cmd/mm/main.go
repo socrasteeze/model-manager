@@ -34,16 +34,19 @@ import (
 // version is overridden at build time with -ldflags "-X main.version=..."
 var version = "dev"
 
-const usage = `mm — Model Manager (Phase 0)
+const usage = `mm — Model Manager
 
-Metadata binds to file content, not to path. This command walks model roots,
-hashes what it finds, and records raw uninterpreted facts in a single SQLite
-file. It never modifies, moves, renames, or deletes a model file.
+Metadata binds to file content, not to path. The primary key is the SHA256 of
+the model file; path is a mutable attribute, so moving or renaming a file never
+detaches what is known about it.
+
+Never modifies, moves, renames, or deletes a model file.
 
 USAGE
     mm <command> [flags]
 
 COMMANDS
+    serve      Run the daemon: HTTP API and web UI
     scan       Walk model roots and record what is there
     interpret  Turn stored headers into typed metadata (reads no model files)
     ingest     Read other tools' sidecars beside model files (read-only)
@@ -68,6 +71,8 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "serve":
+		err = cmdServe(ctx, os.Args[2:])
 	case "scan":
 		err = cmdScan(ctx, os.Args[2:])
 	case "interpret":
