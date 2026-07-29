@@ -3,8 +3,8 @@
 Working name: TBD. Independent metadata authority and organization layer for a local model
 library.
 
-Status: **Phase 0 implemented** (see `docs/phase0.md`). Phases 1–5 not started.
-Revised 2026-07-27 following design review.
+Status: **all phases implemented** (see `docs/`). Revised 2026-07-27 following
+design review; built out 2026-07-29.
 
 > **What changed from v1.** Two things invalidated parts of the original spec. First, the app
 > is now intended to be **distributable** — good enough to offer publicly as a replacement for
@@ -691,11 +691,10 @@ v1 left these open. All are now settled.
 2. Confirm where each SD tool runs relative to the array, since the answer selects the default
    link strategy.
 3. ~~Build Phase 0 — Go scanner writing SQLite, raw uninterpreted facts only.~~ **Done.**
-   `mm scan / report / verify / bench`; see `docs/phase0.md`.
-4. Run Phase 0 against the real array during a migration quiet window, then follow the
-   verification procedure in `docs/phase0.md`. Its output — the distinct-model count and the
-   size distribution — is the input §16.3 says to size the SSD tier from, and the gate on
-   everything in Phase 1.
+4. ~~Build Phases 1–5.~~ **Done.** See `docs/phase0.md` through `docs/phase4-5.md`.
+5. Run against the real array during a migration quiet window, then follow the verification
+   procedure in `docs/phase0.md`. Its output — the distinct-model count and the size
+   distribution — is the input §16.3 says to size the SSD tier from.
 
 ### 19.1 Implementation notes from Phase 0
 
@@ -709,8 +708,32 @@ Two refinements to §6's data model, both recorded in `internal/store/schema.go`
   sharing a size and a sample — resolves to a full hash rather than to whichever row came back
   first.
 
+### 19.2 Further implementation notes
+
 One thing §2.1's table understates: **GGUF v1 also yields a NULL `weights_sha256`.** It used a
 32-bit layout, and walking it with the v2/v3 reader produces a plausible but wrong data offset.
 A wrong rebinding key is worse than no key, so v1 is declined rather than guessed at. The same
 applies to any file whose framing fails to parse, and to a weights region of zero length —
 whose hash would otherwise be the digest of the empty string, identical across every such file.
+
+**Two rules the build added that the spec did not anticipate.**
+
+- **Silence is only sometimes a retraction.** §7 says nothing about what happens when a
+  source stops mentioning a field it once reported. For an external sidecar the answer must
+  be "nothing" — a tool that crashes halfway through writing one must not be able to erase a
+  value. But for the app's *own* derived sources, which recompute from complete input on
+  every run, silence genuinely is a retraction: a field the current rules no longer produce
+  is a stale artifact of an older rule. Without this distinction an interpretation bug can
+  never be fully fixed, which showed up as a wrong version string surviving into generated
+  view filenames.
+
+- **Stored timestamps must be fixed-width.** `time.RFC3339Nano` trims trailing zeros from
+  the fractional seconds, so `.1Z` sorts *after* `.12Z` as a string. Three places compared
+  stored timestamps as strings and were each silently wrong: `ORDER BY last_verified`, the
+  negative-cache expiry check, and the LRU ordering deciding which staged model to evict.
+
+**Sidecar projection needs a generator marker.** §5 describes regenerating sidecars but not
+how to tell the app's own output from a file another tool authored. Without that distinction
+projection has to choose between never overwriting (making regeneration useless) and always
+overwriting (destroying data master never captured). A marker key in each generated file
+resolves it: regeneration repairs a stomped sidecar, a foreign file is left alone.

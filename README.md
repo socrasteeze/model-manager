@@ -15,8 +15,8 @@ SHA256 of the model file; path becomes a mutable attribute.
 
 - File moves between roots → hash unchanged → metadata still attached
 - Same model in two places → one record, two paths
-- A tool scrambles its sidecar → rehash, look it up, regenerate
-- Orphaning becomes recoverable for anything previously seen
+- A tool scrambles its sidecar → regenerate it from master
+- A tool rewrites a header in place → the weights-region hash rebinds the record
 
 Civitai indexes by SHA256 too, so the key that identifies a file locally is the
 same key used to enrich it.
@@ -25,24 +25,23 @@ See [`model-manager-spec.md`](model-manager-spec.md) for the full design.
 
 ## Status
 
-**Phase 0 is implemented.** A standalone scanner that walks model roots, hashes
-everything, captures format headers verbatim, and writes raw uninterpreted facts
-to a single SQLite file.
+All phases implemented. One static binary, no services, no configuration.
 
-Phase 0 deliberately interprets nothing — no typed metadata fields, no enrichment,
-no UI, no writes outside its own database. The facts it records stay valid no
-matter what Phase 1 decides about the schema, so a schema change never costs a
-re-hash of 7.5TB.
-
-Later phases — read-only index with UI and API, enrichment and download,
-presentation layer, SSD tiering, sidecar projection — are described in §15 of the
-spec.
+| Phase | What | Docs |
+|---|---|---|
+| 0 | Hash pass: dual hashes, headers captured verbatim, SQLite index | [phase0](docs/phase0.md) |
+| 1 | Provenance engine, header interpretation, ingest, search, API, UI | [phase1](docs/phase1.md) |
+| 2 | Civitai/HF enrichment and archive, resumable downloads | [phase2](docs/phase2.md) |
+| 3 | Link-strategy engine and generated views | [phase3](docs/phase3.md) |
+| 4 | SSD tiering | [phase4-5](docs/phase4-5.md) |
+| 5 | Sidecar projection | [phase4-5](docs/phase4-5.md) |
 
 ## Build
 
 ```sh
 make build          # -> bin/mm
 make test
+make ui             # rebuild the web UI (needs Node; the built output is committed)
 make release        # cross-compiled matrix -> bin/mm-<os>-<arch>
 ```
 
@@ -52,36 +51,78 @@ pure Go, so `GOOS`/`GOARCH` builds every target from one machine.
 ## Quick start
 
 ```sh
-mm bench --root /path/to/models --workers 1,2,4   # measure the array first
-mm scan  --root /path/to/models --workers 4       # hash everything
-mm report                                          # distinct models, duplication
-mm verify --sample 25                              # prove the index against disk
+mm detect                                    # find your existing tools
+mm bench  --root /path/to/models             # measure the array before choosing concurrency
+mm scan   --root /path/to/models --workers 4 # hash everything
+mm interpret                                 # headers -> typed metadata (no disk reads)
+mm ingest                                    # read other tools' sidecars
+mm report                                    # distinct models, duplication, size spread
+mm serve                                     # browse at http://127.0.0.1:8737
 ```
 
-The scan commits per file, so an interrupt resumes rather than restarting, and a
-rescan of an unchanged tree costs a stat pass rather than a hash pass.
+Then, once the index is proven:
 
-Full documentation: [`docs/phase0.md`](docs/phase0.md).
+```sh
+mm enrich                                    # Civitai lookup by hash, archived forever
+mm view create --name by-base --root /views/by-base --group-by base_model
+mm view generate by-base                     # organize without moving a byte
+mm project --target stability-matrix         # write sidecars back out
+```
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `serve` | HTTP API and web UI |
+| `scan` | Walk roots, hash, record raw facts |
+| `interpret` | Turn stored headers into typed metadata (reads no model files) |
+| `ingest` | Read other tools' sidecars (read-only) |
+| `enrich` | Look models up on Civitai by hash and archive the response |
+| `get` | Download a model, resumable and checksum-verified |
+| `view` | Define and generate organized views, non-destructively |
+| `tier` | Stage hot models onto fast storage |
+| `project` | Write master metadata back out as tool sidecars |
+| `link-probe` | Report which link mechanisms work between two directories |
+| `detect` | Find installed SD tools and their model roots |
+| `reindex` | Rebuild the search index and re-resolve every record |
+| `report` | Distinct models, duplication, size distribution |
+| `verify` | Re-read files and check the index against the disk |
+| `bench` | Compare hashing throughput at different worker counts |
 
 ## Guarantees
 
-- **Never modifies, moves, renames, or deletes a model file.** Model files are
-  opened read-only. Phase 0 creates nothing at all inside the model tree.
-- **Reports duplicates, never deletes them.** Surfacing them is the feature;
-  pulling the trigger is not.
-- **Fully offline.** Phase 0 makes no network requests of any kind.
+- **Never modifies, moves, renames, or deletes an existing model file.** Model
+  files are opened read-only. The only files created are ones you asked for:
+  downloads at a destination you chose, view entries, tier copies, and sidecars.
+- **Reports duplicates, never deletes them.** Surfacing them is the feature.
+- **Manual metadata is never overwritten by any ingest.** When an origin later
+  disagrees, that surfaces as a suggestion with one-click accept, not a silent
+  replacement.
+- **Fully offline except enrichment.** Everything but Civitai/HF lookup works
+  with no network at all.
+- **Binds `127.0.0.1` by default**, with a Host allowlist against DNS rebinding
+  and no CORS wildcard. A token is required off-loopback.
 - **The database is a single file** you can copy, which is what makes the
   declared sole authority backable.
 
 ## Layout
 
 ```
-cmd/mm                  CLI: scan, report, verify, bench
+cmd/mm                  CLI
 internal/store          SQLite schema, migrations, the only code that writes it
 internal/hashing        Dual-hash streaming pass and the sampled probe
 internal/modelformat    safetensors / GGUF framing; locates the weights region
 internal/scan           Root walking, cache tiers, per-device workers
-internal/report         Distinct-model, duplication and size-distribution figures
-internal/verify         Re-reads files and checks the index against the disk
-internal/bench          Hashing throughput at different worker counts
+internal/provenance     Which of several competing values for a field wins
+internal/interpret      Stored headers and paths -> typed observations
+internal/ingest         Other tools' sidecars, read-only
+internal/origin         Civitai / HuggingFace lookup and permanent archive
+internal/download       Resumable, verified, quarantined transfers
+internal/link           Reflink / block-clone / symlink / hardlink / copy
+internal/view           Generated directory trees over the library
+internal/tier           Staging onto fast storage
+internal/project        Master -> tool sidecar dialects
+internal/api            HTTP API and the §11 security baseline
+internal/webui          The embedded front-end (built assets committed)
+web/                    React / TypeScript / Vite source
 ```
