@@ -22,6 +22,7 @@ import (
 
 	"github.com/socrasteeze/model-manager/internal/bench"
 	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/detect"
 	"github.com/socrasteeze/model-manager/internal/ingest"
 	"github.com/socrasteeze/model-manager/internal/interpret"
 	"github.com/socrasteeze/model-manager/internal/report"
@@ -46,6 +47,8 @@ COMMANDS
     scan       Walk model roots and record what is there
     interpret  Turn stored headers into typed metadata (reads no model files)
     ingest     Read other tools' sidecars beside model files (read-only)
+    detect     Find installed SD tools and their model roots
+    reindex    Rebuild the search index and re-resolve every record
     report     Summarize the index: distinct models, duplication, size spread
     verify     Re-read files and check the index against the disk
     bench      Compare hashing throughput at different worker counts
@@ -71,6 +74,10 @@ func main() {
 		err = cmdInterpret(ctx, os.Args[2:])
 	case "ingest":
 		err = cmdIngest(ctx, os.Args[2:])
+	case "detect":
+		err = cmdDetect(os.Args[2:])
+	case "reindex":
+		err = cmdReindex(os.Args[2:])
 	case "report":
 		err = cmdReport(os.Args[2:])
 	case "verify":
@@ -323,6 +330,100 @@ they survive the model being moved.`)
 // database stays small enough to copy (spec §16.4).
 func defaultBlobDir(dbPath string) string {
 	return filepath.Join(filepath.Dir(dbPath), "blobs")
+}
+
+// --- detect ------------------------------------------------------------------
+
+func cmdDetect(args []string) error {
+	fs := newFlagSet("detect", `mm detect
+
+Finds installed ComfyUI, SwarmUI, Stability Matrix, A1111, Forge, InvokeAI and
+Fooocus installations and reports their model roots, ready to pass to mm scan.
+
+Read-only, and deliberately shallow: walking a whole home directory would turn a
+first run into an unexplained multi-minute pause. Set MM_SEARCH_PATHS to point it
+somewhere it would not otherwise look.`)
+
+	asJSON := fs.Bool("json", false, "emit JSON instead of text")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	installs := detect.Detect()
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(installs)
+	}
+
+	if len(installs) == 0 {
+		fmt.Println("No known SD tool installations found.")
+		fmt.Println("\nPoint the scanner at your library directly:")
+		fmt.Println("    mm scan --root /path/to/models")
+		fmt.Println("\nOr widen the search:  MM_SEARCH_PATHS=/mnt/data mm detect")
+		return nil
+	}
+
+	for _, i := range installs {
+		fmt.Printf("%s\n  %s\n", i.Tool, i.Path)
+		for _, r := range i.ModelRoots {
+			fmt.Printf("    models: %s\n", r)
+		}
+		for _, n := range i.Notes {
+			fmt.Printf("    note:   %s\n", n)
+		}
+		fmt.Println()
+	}
+
+	roots := detect.ModelRoots(installs)
+	fmt.Println("Scan everything found:")
+	fmt.Print("    mm scan")
+	for _, r := range roots {
+		fmt.Printf(" --root %s", r)
+	}
+	fmt.Println()
+	return nil
+}
+
+// --- reindex -----------------------------------------------------------------
+
+func cmdReindex(args []string) error {
+	fs := newFlagSet("reindex", `mm reindex
+
+Re-resolves every record from its stored field candidates and rebuilds the
+full-text index.
+
+Both are derived data, so this is always safe to run and never loses anything.
+Use it after upgrading, after changing resolution rules, or if search results
+ever look stale.`)
+
+	dbPath := fs.String("db", defaultDBPath(), "path to the master database")
+	allowNetDB := fs.Bool("allow-network-db", false, "permit a database on a network filesystem")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	st, err := openStore(*dbPath, *allowNetDB)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	resolved, err := st.ResolveAll(func(done int) {
+		fmt.Fprintf(os.Stderr, "\rresolved %d...", done)
+	})
+	if err != nil {
+		return err
+	}
+	indexed, err := st.ReindexSearch(func(done int) {
+		fmt.Fprintf(os.Stderr, "\rindexed %d...", done)
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr)
+	fmt.Printf("re-resolved %d record(s), indexed %d model(s)\n", resolved, indexed)
+	return nil
 }
 
 // --- report ------------------------------------------------------------------

@@ -172,6 +172,12 @@ func (s *Store) ResolveModel(sha string) (*ModelRecord, error) {
 	if err := s.refreshSuggestions(sha, byField); err != nil {
 		return nil, err
 	}
+	// Search reads the materialized row, so the index has to move with it.
+	// Refreshing here rather than on a schedule means a value edited in the UI
+	// is findable immediately, which is the behaviour anyone expects.
+	if err := s.reindexOne(sha); err != nil {
+		return nil, err
+	}
 	return rec, nil
 }
 
