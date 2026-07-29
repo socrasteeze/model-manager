@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/timestamp"
 )
 
 // Providers.
@@ -74,13 +75,13 @@ func (c *Cache) Get(provider, key string) (*CacheEntry, bool, error) {
 
 	e.Found = found == 1
 	e.HTTPStatus = status
-	e.FetchedAt, _ = time.Parse(time.RFC3339Nano, fetchedAt)
+	e.FetchedAt, _ = timestamp.Parse(fetchedAt)
 	if raw.Valid {
 		e.Raw = json.RawMessage(raw.String)
 	}
 
 	if !e.Found && expiresAt.Valid {
-		if expiry, err := time.Parse(time.RFC3339Nano, expiresAt.String); err == nil {
+		if expiry, err := timestamp.Parse(expiresAt.String); err == nil {
 			if time.Now().After(expiry) {
 				return nil, false, nil
 			}
@@ -108,7 +109,7 @@ func (c *Cache) put(provider, key string, found bool, raw json.RawMessage, statu
 	}
 	var expiresValue any
 	if expires != nil {
-		expiresValue = expires.UTC().Format(time.RFC3339Nano)
+		expiresValue = timestamp.Format(*expires)
 	}
 	foundInt := 0
 	if found {
@@ -131,7 +132,7 @@ func (c *Cache) put(provider, key string, found bool, raw json.RawMessage, statu
             fetched_at   = excluded.fetched_at,
             expires_at   = excluded.expires_at`,
 		provider, key, foundInt, rawValue, status,
-		time.Now().UTC().Format(time.RFC3339Nano), expiresValue)
+		timestamp.Now(), expiresValue)
 	if err != nil {
 		return fmt.Errorf("origin: writing cache: %w", err)
 	}
@@ -178,7 +179,7 @@ func (c *Cache) Stats() (*ArchiveStats, error) {
                                AND expires_at < ? THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(LENGTH(COALESCE(raw_response, ''))), 0)
           FROM origin_cache`,
-		time.Now().UTC().Format(time.RFC3339Nano),
+		timestamp.Now(),
 	).Scan(&s.Positive, &s.Negative, &s.NegativeExpired, &s.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("origin: archive stats: %w", err)

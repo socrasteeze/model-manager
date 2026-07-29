@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/socrasteeze/model-manager/internal/provenance"
+	"github.com/socrasteeze/model-manager/internal/timestamp"
 )
 
 // Metadata operations: field candidates, resolution into the materialized
@@ -118,7 +118,7 @@ func (s *Store) Candidates(sha string) ([]provenance.Candidate, error) {
 			return nil, err
 		}
 		c.Tier = provenance.Tier(tier)
-		c.ObservedAt, _ = time.Parse(time.RFC3339Nano, observed)
+		c.ObservedAt, _ = timestamp.Parse(observed)
 		out = append(out, c)
 	}
 	return out, rows.Err()

@@ -53,6 +53,8 @@ COMMANDS
     enrich     Look models up on Civitai by hash and archive the result
     get        Download a model from a URL, resumable and verified
     view       Define and generate organized views (non-destructive)
+    tier       Stage hot models onto fast storage
+    project    Write master metadata back out as tool sidecars
     link-probe Report which link mechanisms work between two directories
     detect     Find installed SD tools and their model roots
     reindex    Rebuild the search index and re-resolve every record
@@ -89,6 +91,10 @@ func main() {
 		err = cmdGet(ctx, os.Args[2:])
 	case "view":
 		err = cmdView(ctx, os.Args[2:])
+	case "tier":
+		err = cmdTier(ctx, os.Args[2:])
+	case "project":
+		err = cmdProject(ctx, os.Args[2:])
 	case "link-probe":
 		err = cmdLinkProbe(os.Args[2:])
 	case "detect":

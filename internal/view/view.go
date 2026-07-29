@@ -17,6 +17,7 @@ import (
 
 	"github.com/socrasteeze/model-manager/internal/link"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/timestamp"
 )
 
 // Grouping decides the subdirectory layout.
@@ -90,7 +91,7 @@ func (m *Manager) Create(def Definition) (*Definition, error) {
         INSERT INTO view (name, root, group_by, filter, created_at, status)
         VALUES (?, ?, ?, ?, ?, 'never-generated')`,
 		def.Name, def.Root, string(def.GroupBy), string(filterJSON),
-		time.Now().UTC().Format(time.RFC3339Nano))
+		timestamp.Now())
 	if err != nil {
 		return nil, fmt.Errorf("view: creating %q: %w", def.Name, err)
 	}
@@ -277,7 +278,7 @@ func (m *Manager) Generate(ctx context.Context, name string, opts GenerateOption
 		}
 		if _, err := m.st.DB().Exec(
 			`UPDATE view SET generated_at = ?, strategy = ?, status = ? WHERE id = ?`,
-			time.Now().UTC().Format(time.RFC3339Nano), string(strategy), status, def.ID); err != nil {
+			timestamp.Now(), string(strategy), status, def.ID); err != nil {
 			return result, err
 		}
 		m.pruneEmptyDirs(def.Root)
@@ -490,7 +491,7 @@ func (m *Manager) recordEntry(viewID int64, want plannedEntry, path string, s li
             view_id = excluded.view_id, sha256 = excluded.sha256,
             source_path = excluded.source_path, strategy = excluded.strategy`,
 		viewID, want.sha, path, want.sourcePath, string(s), want.bytes,
-		time.Now().UTC().Format(time.RFC3339Nano))
+		timestamp.Now())
 	if err != nil {
 		return fmt.Errorf("view: recording entry %s: %w", path, err)
 	}

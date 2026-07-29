@@ -13,9 +13,10 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/socrasteeze/model-manager/internal/timestamp"
 )
 
 // Store is a handle on the master database.
@@ -168,5 +169,5 @@ func (s *Store) SchemaVersion() (int, error) {
 }
 
 func nowUTC() string {
-	return time.Now().UTC().Format(time.RFC3339Nano)
+	return timestamp.Now()
 }
