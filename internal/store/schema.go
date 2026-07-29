@@ -318,4 +318,66 @@ CREATE VIRTUAL TABLE model_search USING fts5(
     tokenize = 'unicode61 remove_diacritics 2'
 );
 `,
+	// --- 3: Phase 3 presentation layer ---------------------------------------
+	//
+	// Organize by views, not by moving bytes (spec 9). The app owns a directory
+	// tree that consuming tools point at; nothing points at real files directly,
+	// so grouping and labelling are fully reversible and carry no risk to the
+	// library.
+	`
+CREATE TABLE view (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT    NOT NULL UNIQUE,
+    root         TEXT    NOT NULL,
+
+    -- How entries are grouped into subdirectories: base_model, type, tag,
+    -- collection, or flat.
+    group_by     TEXT    NOT NULL DEFAULT 'flat',
+
+    -- JSON filter using the same shape as a search query, so a view is
+    -- literally a saved search, materialized.
+    filter       TEXT,
+
+    -- The link strategy last used. Recorded rather than assumed, because it
+    -- decides whether entries are safe for a consumer to write through.
+    strategy     TEXT,
+
+    created_at   TEXT    NOT NULL,
+    generated_at TEXT,
+    status       TEXT    NOT NULL DEFAULT 'never-generated'
+) STRICT;
+
+-- Every file this app created inside a view, so a view can be removed exactly.
+--
+-- Deleting a view means deleting only the entries recorded here, never
+-- everything under the root: a user who points a view at a directory that
+-- already holds something must not lose it.
+CREATE TABLE view_entry (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    view_id     INTEGER NOT NULL REFERENCES view(id) ON DELETE CASCADE,
+    sha256      TEXT    NOT NULL REFERENCES model_file(sha256) ON DELETE CASCADE,
+    path        TEXT    NOT NULL UNIQUE,
+    source_path TEXT    NOT NULL,
+    strategy    TEXT    NOT NULL,
+    bytes       INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT    NOT NULL
+) STRICT;
+
+CREATE INDEX idx_view_entry_view ON view_entry (view_id);
+CREATE INDEX idx_view_entry_sha  ON view_entry (sha256);
+
+-- Shared-extent measurements, cached on (device, inode, mtime) exactly like the
+-- hash cache. FIEMAP is per-file syscall work across a whole library, so
+-- re-measuring an unchanged file on every report is not affordable.
+CREATE TABLE extent_cache (
+    device      INTEGER NOT NULL,
+    inode       INTEGER NOT NULL,
+    mtime_ns    INTEGER NOT NULL,
+    apparent    INTEGER NOT NULL,
+    shared      INTEGER NOT NULL,
+    exclusive   INTEGER NOT NULL,
+    measured_at TEXT    NOT NULL,
+    PRIMARY KEY (device, inode, mtime_ns)
+) STRICT;
+`,
 }

@@ -319,3 +319,71 @@ func TestGetModelRecordMissing(t *testing.T) {
 		t.Fatal("a missing record returned a value")
 	}
 }
+
+// A derived source recomputes everything it knows on every run, so a field it
+// stops producing is a stale artifact of an older rule -- not a surviving
+// opinion. Merging would mean an interpretation bug could never be fully fixed.
+func TestReplaceObservationsRetractsStaleFields(t *testing.T) {
+	s, sha := metaStore(t)
+
+	if err := s.ReplaceObservations(sha, provenance.SourcePathHeuristic, []FieldObservation{
+		{Field: provenance.FieldName, Value: "ckpt 0"},
+		{Field: provenance.FieldVersion, Value: "0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := s.ResolveModel(sha)
+	if rec.Version != "0" {
+		t.Fatalf("setup failed: version = %q", rec.Version)
+	}
+
+	// An improved rule no longer treats a bare trailing digit as a version.
+	if err := s.ReplaceObservations(sha, provenance.SourcePathHeuristic, []FieldObservation{
+		{Field: provenance.FieldName, Value: "ckpt 0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ = s.ResolveModel(sha)
+	if rec.Version != "" {
+		t.Fatalf("version = %q; the stale value survived an improved rule", rec.Version)
+	}
+	if rec.Name != "ckpt 0" {
+		t.Fatalf("name = %q; replacing dropped a field it should have kept", rec.Name)
+	}
+}
+
+// Replacing one source must not disturb another's opinion.
+func TestReplaceObservationsIsScopedToItsSource(t *testing.T) {
+	s, sha := metaStore(t)
+
+	_ = s.RecordObservations(sha, provenance.SourceCivitai,
+		obs(provenance.FieldVersion, "v3.0"))
+	_ = s.ReplaceObservations(sha, provenance.SourcePathHeuristic,
+		obs(provenance.FieldVersion, "0"))
+	_ = s.ReplaceObservations(sha, provenance.SourcePathHeuristic,
+		obs(provenance.FieldName, "just a name"))
+
+	rec, _ := s.ResolveModel(sha)
+	if rec.Version != "v3.0" {
+		t.Fatalf("version = %q; replacing a derived source clobbered the origin", rec.Version)
+	}
+}
+
+// An external sidecar's silence is not evidence: a tool that crashes halfway
+// through writing one must not be able to erase a value.
+func TestRecordObservationsStillMerges(t *testing.T) {
+	s, sha := metaStore(t)
+
+	_ = s.RecordObservations(sha, provenance.SourceSwarmUI, []FieldObservation{
+		{Field: provenance.FieldName, Value: "From Swarm"},
+		{Field: provenance.FieldVersion, Value: "v2"},
+	})
+	// A later read of a truncated sidecar mentions only the name.
+	_ = s.RecordObservations(sha, provenance.SourceSwarmUI,
+		obs(provenance.FieldName, "From Swarm"))
+
+	rec, _ := s.ResolveModel(sha)
+	if rec.Version != "v2" {
+		t.Fatalf("version = %q; a partial sidecar erased a value", rec.Version)
+	}
+}

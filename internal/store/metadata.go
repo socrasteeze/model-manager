@@ -486,3 +486,60 @@ func nullable(s string) any {
 	}
 	return s
 }
+
+// ReplaceObservations is RecordObservations for a source that recomputes
+// everything it knows on every run.
+//
+// RecordObservations treats silence as non-retraction: a source that stops
+// mentioning a field leaves its previous claim standing, so a tool cannot erase
+// a value by crashing halfway through writing its sidecar. That is right for
+// external sidecars and APIs, whose absence of a field is not evidence.
+//
+// It is wrong for our own derived sources -- the header interpreter and the path
+// heuristics -- which see complete input every time. There, silence IS a
+// retraction: if an improved rule stops producing a value, the old one is not a
+// surviving opinion, it is a stale artifact of the previous rule, and leaving it
+// in place means an interpretation bug can never be fully fixed.
+func (s *Store) ReplaceObservations(sha, source string, obs []FieldObservation) error {
+	keep := make(map[string]bool, len(obs))
+	for _, o := range obs {
+		keep[o.Field] = true
+	}
+
+	s.wmu.Lock()
+	rows, err := s.db.Query(
+		`SELECT field FROM field_value WHERE sha256 = ? AND source = ?`, sha, source)
+	if err != nil {
+		s.wmu.Unlock()
+		return fmt.Errorf("store: reading prior observations: %w", err)
+	}
+	var stale []string
+	for rows.Next() {
+		var field string
+		if err := rows.Scan(&field); err != nil {
+			rows.Close()
+			s.wmu.Unlock()
+			return err
+		}
+		if !keep[field] {
+			stale = append(stale, field)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		s.wmu.Unlock()
+		return err
+	}
+
+	for _, field := range stale {
+		if _, err := s.db.Exec(
+			`DELETE FROM field_value WHERE sha256 = ? AND source = ? AND field = ?`,
+			sha, source, field); err != nil {
+			s.wmu.Unlock()
+			return fmt.Errorf("store: retracting %s/%s: %w", sha, field, err)
+		}
+	}
+	s.wmu.Unlock()
+
+	return s.RecordObservations(sha, source, obs)
+}

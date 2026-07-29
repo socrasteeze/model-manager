@@ -110,8 +110,12 @@ func Run(ctx context.Context, st *store.Store, opts Options) (*Stats, error) {
 		if ctx.Err() != nil {
 			break
 		}
+		// Replace rather than merge. These are our own derived sources, computed
+		// from complete input every run, so a field this pass no longer produces
+		// is a stale artifact of an older rule rather than a surviving opinion.
+		// Merging would mean an interpretation bug could never be fully fixed.
 		for source, obs := range p.bySource {
-			if err := st.RecordObservations(p.sha, source, obs); err != nil {
+			if err := st.ReplaceObservations(p.sha, source, obs); err != nil {
 				return stats, err
 			}
 		}

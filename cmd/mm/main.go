@@ -52,6 +52,8 @@ COMMANDS
     ingest     Read other tools' sidecars beside model files (read-only)
     enrich     Look models up on Civitai by hash and archive the result
     get        Download a model from a URL, resumable and verified
+    view       Define and generate organized views (non-destructive)
+    link-probe Report which link mechanisms work between two directories
     detect     Find installed SD tools and their model roots
     reindex    Rebuild the search index and re-resolve every record
     report     Summarize the index: distinct models, duplication, size spread
@@ -85,6 +87,10 @@ func main() {
 		err = cmdEnrich(ctx, os.Args[2:])
 	case "get":
 		err = cmdGet(ctx, os.Args[2:])
+	case "view":
+		err = cmdView(ctx, os.Args[2:])
+	case "link-probe":
+		err = cmdLinkProbe(os.Args[2:])
 	case "detect":
 		err = cmdDetect(os.Args[2:])
 	case "reindex":
