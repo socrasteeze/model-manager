@@ -124,4 +124,198 @@ CREATE TABLE scan_error (
 
 CREATE INDEX idx_scan_error_run ON scan_error (scan_run_id);
 `,
+
+	// --- 2: Phase 1 interpretation layer -------------------------------------
+	//
+	// Everything above this line is a raw fact. Everything below is an
+	// interpretation of one, and can be recomputed from the facts plus whatever
+	// was ingested -- which is why a change down here never costs a re-hash.
+	`
+-- Every candidate value for every field, with where it came from and when
+-- (spec §7). This table is the thing that prevents re-inventing the original
+-- bug: no ingest can silently replace a value, because nothing is ever replaced
+-- -- candidates accumulate and a resolver picks a winner.
+--
+-- One row per (model, field, source). Re-ingesting from the same source updates
+-- that source's row in place; it never touches another source's opinion.
+CREATE TABLE field_value (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha256      TEXT    NOT NULL REFERENCES model_file(sha256) ON DELETE CASCADE,
+    field       TEXT    NOT NULL,
+
+    -- JSON-encoded, always. Scalars and arrays share this column, and encoding
+    -- everything means a trigger-word list and a weight round-trip through the
+    -- same code path without a type tag beside them.
+    value       TEXT    NOT NULL,
+
+    source      TEXT    NOT NULL,
+    source_tier INTEGER NOT NULL,  -- 3 manual, 2 origin, 1 tool-derived
+    observed_at TEXT    NOT NULL,
+
+    UNIQUE (sha256, field, source)
+) STRICT;
+
+CREATE INDEX idx_field_value_lookup ON field_value (sha256, field);
+
+-- The resolved winners, materialized into typed indexed columns (spec §7.1).
+-- Search and the UI read this; resolution rewrites it on ingest. Pure EAV would
+-- make search painful, and typed-only would lose the provenance that is the
+-- entire point -- so both exist, with this side derived from the other.
+CREATE TABLE model_record (
+    sha256               TEXT PRIMARY KEY REFERENCES model_file(sha256) ON DELETE CASCADE,
+    type                 TEXT,     -- checkpoint / lora / lycoris / vae / embedding / controlnet / upscaler
+    base_model           TEXT,     -- SDXL / Flux / Krea 2 / Qwen / Wan / Anima 2B / ...
+    name                 TEXT,
+    version              TEXT,
+    description          TEXT,
+    trigger_words        TEXT,     -- JSON array
+    recommended_weight   REAL,
+    recommended_settings TEXT,     -- JSON object
+    nsfw                 INTEGER,
+    origin               TEXT,     -- civitai / huggingface / self-trained / unknown
+    updated_at           TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_model_record_type ON model_record (type);
+CREATE INDEX idx_model_record_base ON model_record (base_model);
+CREATE INDEX idx_model_record_name ON model_record (name);
+
+-- A manual value is never overwritten by ingest. But when Origin later appears
+-- and disagrees, silently discarding it makes stale manual values invisible and
+-- permanent (spec §7.1) -- so the disagreement is surfaced here for one-click
+-- accept instead.
+CREATE TABLE suggestion (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha256          TEXT    NOT NULL REFERENCES model_file(sha256) ON DELETE CASCADE,
+    field           TEXT    NOT NULL,
+    manual_value    TEXT    NOT NULL,
+    suggested_value TEXT    NOT NULL,
+    source          TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL,
+    status          TEXT    NOT NULL DEFAULT 'pending',  -- pending | accepted | dismissed
+    UNIQUE (sha256, field, source)
+) STRICT;
+
+CREATE INDEX idx_suggestion_pending ON suggestion (status) WHERE status = 'pending';
+
+CREATE TABLE tag (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL UNIQUE,
+    created_at TEXT    NOT NULL
+) STRICT;
+
+CREATE TABLE model_tag (
+    sha256   TEXT    NOT NULL REFERENCES model_file(sha256) ON DELETE CASCADE,
+    tag_id   INTEGER NOT NULL REFERENCES tag(id) ON DELETE CASCADE,
+    source   TEXT    NOT NULL,
+    added_at TEXT    NOT NULL,
+    PRIMARY KEY (sha256, tag_id)
+) STRICT;
+
+CREATE INDEX idx_model_tag_tag ON model_tag (tag_id);
+
+-- Groups. Pure metadata, so they land in Phase 2 rather than waiting for the
+-- presentation layer, and a view (§9) can later be generated from one.
+CREATE TABLE collection (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL UNIQUE,
+    description TEXT,
+    created_at  TEXT    NOT NULL
+) STRICT;
+
+CREATE TABLE collection_member (
+    collection_id INTEGER NOT NULL REFERENCES collection(id) ON DELETE CASCADE,
+    sha256        TEXT    NOT NULL REFERENCES model_file(sha256) ON DELETE CASCADE,
+    position      INTEGER NOT NULL DEFAULT 0,
+    added_at      TEXT    NOT NULL,
+    PRIMARY KEY (collection_id, sha256)
+) STRICT;
+
+-- Self-trained models (spec §8). The thing no existing tool does at all, and
+-- arguably the highest-value part of the app -- right now this knowledge lives
+-- in scattered configs and memory.
+CREATE TABLE training_record (
+    sha256       TEXT PRIMARY KEY REFERENCES model_file(sha256) ON DELETE CASCADE,
+    dataset      TEXT,
+    dataset_size INTEGER,
+    base         TEXT,
+    config       TEXT,     -- JSON: rank, alpha, optimizer, lr, steps, batch
+    trainer      TEXT,     -- ai-toolkit / Anima TrainFlow / OneTrainer
+    notes        TEXT,
+    run_date     TEXT,
+    source       TEXT NOT NULL,  -- manual | safetensors_header
+    updated_at   TEXT NOT NULL
+) STRICT;
+
+-- App-managed and content-addressed (spec §18). In-place references break on
+-- move, which is the precise failure this app exists to eliminate. Bytes live in
+-- a blob directory beside the database, not inside it, so the database stays
+-- small enough to copy.
+CREATE TABLE preview_image (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    sha256       TEXT    NOT NULL REFERENCES model_file(sha256) ON DELETE CASCADE,
+    image_sha256 TEXT    NOT NULL,
+    mime         TEXT    NOT NULL,
+    bytes        INTEGER NOT NULL,
+    width        INTEGER,
+    height       INTEGER,
+    source       TEXT    NOT NULL,
+    position     INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT    NOT NULL,
+    UNIQUE (sha256, image_sha256)
+) STRICT;
+
+CREATE INDEX idx_preview_model ON preview_image (sha256, position);
+
+-- Models are removed from Civitai regularly, and once gone the metadata is
+-- unrecoverable anywhere (spec §12.1). So the full raw response is stored and
+-- never expired -- this cache is quietly an archive, and for taken-down models
+-- it may be the only surviving copy.
+CREATE TABLE origin_cache (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider     TEXT    NOT NULL,  -- civitai | huggingface
+    lookup_key   TEXT    NOT NULL,
+    found        INTEGER NOT NULL,
+    raw_response TEXT,
+    http_status  INTEGER,
+    fetched_at   TEXT    NOT NULL,
+
+    -- Set for negative lookups only. Without a negative cache every run
+    -- re-queries thousands of known misses; with an expiring one, a model that
+    -- appears upstream later is still picked up.
+    expires_at   TEXT,
+
+    UNIQUE (provider, lookup_key)
+) STRICT;
+
+CREATE INDEX idx_origin_cache_neg ON origin_cache (provider, expires_at) WHERE found = 0;
+
+-- All hash types an origin reports, not just SHA256 (spec §12.1): the others are
+-- how other tools and other providers refer to the same file.
+CREATE TABLE origin_hash (
+    sha256     TEXT NOT NULL REFERENCES model_file(sha256) ON DELETE CASCADE,
+    hash_type  TEXT NOT NULL,   -- SHA256 / AutoV1 / AutoV2 / BLAKE3 / CRC32
+    hash_value TEXT NOT NULL,
+    provider   TEXT NOT NULL,
+    PRIMARY KEY (sha256, hash_type, provider)
+) STRICT;
+
+CREATE INDEX idx_origin_hash_value ON origin_hash (hash_value);
+
+-- FTS5 ships in SQLite, so full-text search costs no extra service (spec §5.1).
+-- Kept in sync explicitly from Go rather than by trigger: the indexed text is
+-- assembled from four tables plus a filename, which is beyond what a trigger can
+-- express without becoming the least debuggable thing in the schema.
+CREATE VIRTUAL TABLE model_search USING fts5(
+    sha256 UNINDEXED,
+    name,
+    description,
+    base_model,
+    type,
+    trigger_words,
+    tags,
+    filename,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+`,
 }
