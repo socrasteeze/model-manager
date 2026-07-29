@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/bench"
+	"github.com/socrasteeze/model-manager/internal/interpret"
 	"github.com/socrasteeze/model-manager/internal/report"
 	"github.com/socrasteeze/model-manager/internal/scan"
 	"github.com/socrasteeze/model-manager/internal/store"
@@ -40,11 +41,12 @@ USAGE
     mm <command> [flags]
 
 COMMANDS
-    scan      Walk model roots and record what is there
-    report    Summarize the index: distinct models, duplication, size spread
-    verify    Re-read files and check the index against the disk
-    bench     Compare hashing throughput at different worker counts
-    version   Print the version
+    scan       Walk model roots and record what is there
+    interpret  Turn stored headers into typed metadata (reads no model files)
+    report     Summarize the index: distinct models, duplication, size spread
+    verify     Re-read files and check the index against the disk
+    bench      Compare hashing throughput at different worker counts
+    version    Print the version
 
 Run "mm <command> -h" for the flags of a command.
 `
@@ -62,6 +64,8 @@ func main() {
 	switch os.Args[1] {
 	case "scan":
 		err = cmdScan(ctx, os.Args[2:])
+	case "interpret":
+		err = cmdInterpret(ctx, os.Args[2:])
 	case "report":
 		err = cmdReport(os.Args[2:])
 	case "verify":
@@ -211,6 +215,47 @@ func progressLine(s scan.Snapshot) string {
 	}
 	return fmt.Sprintf("  %5.1f%%  %d/%d files  %s read, %d cached%s%s   ",
 		pct, s.FilesDone, s.FilesTotal, humanBytes(s.BytesDone), s.FilesCached, rate, errs)
+}
+
+// --- interpret ---------------------------------------------------------------
+
+func cmdInterpret(ctx context.Context, args []string) error {
+	fs := newFlagSet("interpret", `mm interpret
+
+Turns the format headers captured during the scan into typed metadata: model
+type, base model, name, trigger words, and the training record for self-trained
+LoRAs.
+
+Reads no model files. Phase 0 stored the headers verbatim precisely so this pass
+costs a database scan rather than another walk over terabytes, which is what
+makes it safe to re-run whenever the interpretation rules improve.
+
+Manual values are never touched.`)
+
+	dbPath := fs.String("db", defaultDBPath(), "path to the master database")
+	skipPaths := fs.Bool("no-path-heuristics", false,
+		"ignore filenames and directory names as a metadata source")
+	allowNetDB := fs.Bool("allow-network-db", false, "permit a database on a network filesystem")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	st, err := openStore(*dbPath, *allowNetDB)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	stats, err := interpret.Run(ctx, st, interpret.Options{
+		SkipPathHeuristics: *skipPaths,
+		Logf:               func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println(stats.Summary())
+	return nil
 }
 
 // --- report ------------------------------------------------------------------

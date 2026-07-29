@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 )
 
 // GGUF framing:
@@ -174,6 +175,230 @@ func readGGUF(r io.ReaderAt, size int64, maxHeaderBytes int) Header {
 	}
 	h.Blob = blob
 	return h
+}
+
+// GGUFArraySummary stands in for an array too large to be worth materializing,
+// such as a tokenizer vocabulary. The length is the interesting part; the
+// hundreds of thousands of entries are not.
+type GGUFArraySummary struct {
+	Length      int    `json:"length"`
+	ElementType uint32 `json:"element_type"`
+	Sample      []any  `json:"sample,omitempty"`
+}
+
+// ggufArraySampleLimit is how many elements of a long array are kept.
+const ggufArraySampleLimit = 16
+
+// GGUFMetadata extracts the key/value pairs from a stored GGUF header blob.
+//
+// This is the re-runnable half of the design: the blob was captured during the
+// hash pass, so pulling typed metadata out of it later costs a database read
+// rather than another walk over terabytes (spec §15).
+//
+// A truncated blob is handled by returning whatever parsed before the data ran
+// out, together with an error. Partial metadata beats none, and the caller
+// decides what to do with the pairs it got.
+func GGUFMetadata(blob []byte) (map[string]any, error) {
+	out := map[string]any{}
+	c := &cursor{r: bytesReaderAt(blob), size: int64(len(blob))}
+
+	magic, err := c.u32()
+	if err != nil || magic != ggufMagic {
+		return out, fmt.Errorf("modelformat: not a GGUF header")
+	}
+	version, err := c.u32()
+	if err != nil {
+		return out, err
+	}
+	if version < 2 || version > 3 {
+		return out, fmt.Errorf("modelformat: unsupported GGUF version %d", version)
+	}
+	if _, err := c.u64(); err != nil { // tensor count
+		return out, err
+	}
+	kvCount, err := c.u64()
+	if err != nil {
+		return out, err
+	}
+	if kvCount > ggufMaxCount {
+		return out, fmt.Errorf("modelformat: implausible kv count %d", kvCount)
+	}
+
+	for i := uint64(0); i < kvCount; i++ {
+		key, err := c.strFull()
+		if err != nil {
+			return out, fmt.Errorf("modelformat: kv %d key: %w", i, err)
+		}
+		vtype, err := c.u32()
+		if err != nil {
+			return out, fmt.Errorf("modelformat: kv %d type: %w", i, err)
+		}
+		val, err := c.value(vtype)
+		if err != nil {
+			return out, fmt.Errorf("modelformat: kv %d (%q): %w", i, key, err)
+		}
+		if key != "" {
+			out[key] = val
+		}
+	}
+	return out, nil
+}
+
+// strFull reads a length-prefixed string in full, unlike str, which skips long
+// ones because the framing walk only needs to step over them.
+func (c *cursor) strFull() (string, error) {
+	n, err := c.u64()
+	if err != nil {
+		return "", err
+	}
+	if n > 1<<20 {
+		// A metadata *key* this long is not a key. Skip it rather than allocate.
+		return "", c.skip(int64(n))
+	}
+	b, err := c.read(int64(n))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func (c *cursor) value(vtype uint32) (any, error) {
+	switch vtype {
+	case ggufUint8, ggufUint16, ggufUint32:
+		return c.uintN(vtype)
+	case ggufInt8, ggufInt16, ggufInt32:
+		return c.intN(vtype)
+	case ggufBool:
+		b, err := c.fixed(1)
+		if err != nil {
+			return nil, err
+		}
+		return b[0] != 0, nil
+	case ggufFloat32:
+		v, err := c.u32()
+		if err != nil {
+			return nil, err
+		}
+		return float64(math.Float32frombits(v)), nil
+	case ggufFloat64:
+		v, err := c.u64()
+		if err != nil {
+			return nil, err
+		}
+		return math.Float64frombits(v), nil
+	case ggufUint64:
+		v, err := c.u64()
+		if err != nil {
+			return nil, err
+		}
+		return v, nil
+	case ggufInt64:
+		v, err := c.u64()
+		if err != nil {
+			return nil, err
+		}
+		return int64(v), nil
+	case ggufString:
+		return c.strFull()
+	case ggufArray:
+		return c.array()
+	default:
+		return nil, fmt.Errorf("unknown value type %d", vtype)
+	}
+}
+
+func (c *cursor) uintN(vtype uint32) (any, error) {
+	n := ggufScalarSize[vtype]
+	b, err := c.fixed(n)
+	if err != nil {
+		return nil, err
+	}
+	switch n {
+	case 1:
+		return uint64(b[0]), nil
+	case 2:
+		return uint64(binary.LittleEndian.Uint16(b)), nil
+	default:
+		return uint64(binary.LittleEndian.Uint32(b)), nil
+	}
+}
+
+func (c *cursor) intN(vtype uint32) (any, error) {
+	n := ggufScalarSize[vtype]
+	b, err := c.fixed(n)
+	if err != nil {
+		return nil, err
+	}
+	switch n {
+	case 1:
+		return int64(int8(b[0])), nil
+	case 2:
+		return int64(int16(binary.LittleEndian.Uint16(b))), nil
+	default:
+		return int64(int32(binary.LittleEndian.Uint32(b))), nil
+	}
+}
+
+func (c *cursor) array() (any, error) {
+	elemType, err := c.u32()
+	if err != nil {
+		return nil, err
+	}
+	count, err := c.u64()
+	if err != nil {
+		return nil, err
+	}
+	if count > ggufMaxCount {
+		return nil, fmt.Errorf("implausible array length %d", count)
+	}
+
+	summary := GGUFArraySummary{Length: int(count), ElementType: elemType}
+	for i := uint64(0); i < count; i++ {
+		if i < ggufArraySampleLimit {
+			v, err := c.value(elemType)
+			if err != nil {
+				return nil, err
+			}
+			summary.Sample = append(summary.Sample, v)
+			continue
+		}
+		// Past the sample, step over the remainder without materializing it.
+		if sz, ok := ggufScalarSize[elemType]; ok {
+			remaining := int64(count-i) * sz
+			return summary, c.skip(remaining)
+		}
+		if elemType == ggufString {
+			n, err := c.u64()
+			if err != nil {
+				return nil, err
+			}
+			if err := c.skip(int64(n)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		return nil, fmt.Errorf("unsupported array element type %d", elemType)
+	}
+	// A short array is more useful as a plain list than as a summary.
+	if summary.Length <= ggufArraySampleLimit {
+		return summary.Sample, nil
+	}
+	return summary, nil
+}
+
+// bytesReaderAt adapts a byte slice to io.ReaderAt without pulling in bytes.Reader
+// state we do not need.
+type bytesReaderAt []byte
+
+func (b bytesReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 || off > int64(len(b)) {
+		return 0, io.ErrUnexpectedEOF
+	}
+	n := copy(p, b[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
 }
 
 func align(off, a int64) int64 {
