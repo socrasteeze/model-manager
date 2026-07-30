@@ -35,6 +35,7 @@ All phases implemented. One static binary, no services, no configuration.
 | 3 | Link-strategy engine and generated views | [phase3](docs/phase3.md) |
 | 4 | SSD tiering | [phase4-5](docs/phase4-5.md) |
 | 5 | Sidecar projection | [phase4-5](docs/phase4-5.md) |
+| 6 | Remote browsing across Civitai/CivArchive/HuggingFace, update checking | [phase6](docs/phase6.md) |
 
 ## Build
 
@@ -64,6 +65,8 @@ Then, once the index is proven:
 
 ```sh
 mm enrich                                    # Civitai lookup by hash, archived forever
+mm browse "neon ink" --type lora             # search three providers, marked have/update/new
+mm updates                                   # which models have a newer version
 mm view create --name by-base --root /views/by-base --group-by base_model
 mm view generate by-base                     # organize without moving a byte
 mm project --target stability-matrix         # write sidecars back out
@@ -78,6 +81,8 @@ mm project --target stability-matrix         # write sidecars back out
 | `interpret` | Turn stored headers into typed metadata (reads no model files) |
 | `ingest` | Read other tools' sidecars (read-only) |
 | `enrich` | Look models up on Civitai by hash and archive the response |
+| `browse` | Search Civitai, CivArchive and HuggingFace; marks what you already have |
+| `updates` | Report which models have a newer version published |
 | `get` | Download a model, resumable and checksum-verified |
 | `view` | Define and generate organized views, non-destructively |
 | `tier` | Stage hot models onto fast storage |

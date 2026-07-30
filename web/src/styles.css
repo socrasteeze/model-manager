@@ -436,3 +436,235 @@ input:focus, select:focus, textarea:focus {
 @media (min-width: 901px) {
   .sidebar { transform: none !important; }
 }
+
+/* --- Remote browsing --------------------------------------------------- */
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.tabs button {
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 0.45rem 0.8rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.tabs button.on {
+  color: var(--fg);
+  background: var(--surface-2);
+}
+
+.browse {
+  padding: 1rem 1.25rem 3rem;
+  overflow-y: auto;
+}
+
+.browse-search {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.browse-search input {
+  flex: 1;
+}
+
+.browse-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.chip {
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.chip.on {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.check.inline {
+  margin: 0;
+}
+
+.listing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 0.9rem;
+}
+
+.listing {
+  display: flex;
+  gap: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.75rem;
+}
+
+/* Owned results are dimmed rather than hidden: seeing that you already have
+   something is the answer to the question, not noise to be filtered out. */
+.listing.have {
+  opacity: 0.62;
+}
+
+.listing.outdated {
+  border-color: var(--accent);
+}
+
+.listing-thumb {
+  width: 84px;
+  height: 84px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex: none;
+}
+
+.listing-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.listing-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.listing-head h3 {
+  margin: 0 0 0.3rem;
+  font-size: 0.98rem;
+  overflow-wrap: anywhere;
+}
+
+.listing-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-bottom: 0.4rem;
+}
+
+.provider-badge {
+  color: var(--fg);
+}
+
+.nsfw-badge {
+  color: #e0679a;
+}
+
+.have-badge {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.update-badge {
+  background: var(--accent);
+  color: #06121f;
+}
+
+.new-badge {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+
+.listing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+
+.listing-actions .ghost,
+a.ghost {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.warn-note {
+  color: #e6b566;
+  font-size: 0.8rem;
+  margin: 0.35rem 0 0;
+}
+
+.browse-paging {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1.5rem;
+  color: var(--muted);
+}
+
+.updates {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.85rem;
+  margin-bottom: 1rem;
+}
+
+.updates-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.updates-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.update-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.45rem 0;
+  border-top: 1px solid var(--border);
+}
+
+/* The library grid's .badge is absolutely positioned to overlay a card corner.
+   In a browse listing the badge sits inline in the header, and inheriting that
+   absolute position lifts it out to the page corner. */
+.listing .badge,
+.updates .badge {
+  position: static;
+  flex: none;
+}
+
+/* .body sets display:flex, which beats the UA stylesheet's [hidden] rule and
+   left the library visible underneath the browse tab. */
+[hidden] {
+  display: none !important;
+}

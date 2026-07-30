@@ -8,6 +8,7 @@ import {
   type Filters,
   type SearchHit,
 } from './api'
+import { BrowsePanel } from './components/BrowsePanel'
 import { FilterPanel } from './components/FilterPanel'
 import { ModelCard } from './components/ModelCard'
 import { ModelDetailPanel } from './components/ModelDetailPanel'
@@ -25,6 +26,11 @@ export function App() {
   const [facets, setFacets] = useState<Facets | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [filtersOpen, setFiltersOpen] = useState(false)
+
+  // Library and Browse are separate modes rather than one blended result list:
+  // one is an inventory of what is here, the other is a catalogue of what is
+  // not, and merging them would make "have" ambiguous.
+  const [tab, setTab] = useState<'library' | 'browse'>('library')
 
   // Debounce the text box rather than the whole filter object: clicking a facet
   // should feel instant, while typing should not fire a request per keystroke.
@@ -101,23 +107,39 @@ export function App() {
           <span>Model Manager</span>
         </div>
 
-        <input
-          className="search"
-          type="search"
-          placeholder="Search name, trigger word, tag, filename…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          autoComplete="off"
-          spellCheck={false}
-        />
+        <nav className="tabs">
+          <button
+            className={tab === 'library' ? 'on' : ''}
+            onClick={() => setTab('library')}
+          >
+            Library
+          </button>
+          <button className={tab === 'browse' ? 'on' : ''} onClick={() => setTab('browse')}>
+            Browse
+          </button>
+        </nav>
 
-        <button
-          className={`filter-toggle${activeFilterCount ? ' has-filters' : ''}`}
-          onClick={() => setFiltersOpen((v) => !v)}
-          aria-expanded={filtersOpen}
-        >
-          Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
-        </button>
+        {tab === 'library' && (
+          <>
+            <input
+              className="search"
+              type="search"
+              placeholder="Search name, trigger word, tag, filename…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+
+            <button
+              className={`filter-toggle${activeFilterCount ? ' has-filters' : ''}`}
+              onClick={() => setFiltersOpen((v) => !v)}
+              aria-expanded={filtersOpen}
+            >
+              Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
+            </button>
+          </>
+        )}
       </header>
 
       {config.readOnly && (
@@ -126,7 +148,9 @@ export function App() {
         </div>
       )}
 
-      <div className="body">
+      {tab === 'browse' && <BrowsePanel />}
+
+      <div className="body" hidden={tab !== 'library'}>
         <aside className={`sidebar${filtersOpen ? ' open' : ''}`}>
           <FilterPanel
             facets={facets}

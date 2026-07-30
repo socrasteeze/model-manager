@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
 
@@ -31,6 +32,12 @@ type Config struct {
 
 	// Version is reported by /api/health.
 	Version string
+
+	// Origin enables remote browsing and update checking. Nil disables both
+	// endpoints: those are the only ones that make outbound requests, so an
+	// operator who does not want the daemon talking to third parties gets that
+	// by leaving this unset rather than by firewall.
+	Origin *origin.Client
 
 	// ReadOnly refuses every mutating request. Phase 1's contract is that the
 	// index is proven before anything acts on it, and this is how that is
@@ -74,6 +81,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/suggestions", s.handleSuggestions)
 	s.mux.HandleFunc("POST /api/suggestions/{id}/accept", s.handleAcceptSuggestion)
 	s.mux.HandleFunc("POST /api/suggestions/{id}/dismiss", s.handleDismissSuggestion)
+
+	s.mux.HandleFunc("GET /api/browse", s.handleBrowse)
+	s.mux.HandleFunc("GET /api/updates", s.handleUpdates)
+	s.mux.HandleFunc("GET /api/remote-image", s.handleRemoteImage)
 
 	s.mux.HandleFunc("GET /api/facets", s.handleFacets)
 	s.mux.HandleFunc("GET /api/tags", s.handleTags)

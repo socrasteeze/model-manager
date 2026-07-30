@@ -201,6 +201,130 @@ export function searchModels(filters: Filters, offset = 0, limit = 60): Promise<
   return request<SearchResults>(`/api/models?${params}`)
 }
 
+// Remote browsing.
+//
+// A Listing is a claim about a file that is not here yet, which is why it has
+// no sha256 of its own and why `local` is the only field that relates it to the
+// library. That relation is computed by content hash on the server, so "have"
+// means the same bytes are on disk -- not that something with a similar name is.
+
+export interface RemoteFile {
+  name: string
+  size_bytes?: number
+  sha256?: string
+  format?: string
+  primary?: boolean
+  download_url?: string
+  requires_auth?: boolean
+}
+
+export interface LocalMatch {
+  status: 'have' | 'outdated' | 'new'
+  sha256?: string
+  path?: string
+  have_version_id?: string
+  have_version_name?: string
+}
+
+export interface Listing {
+  provider: string
+  id: string
+  version_id?: string
+  version_name?: string
+  name: string
+  author?: string
+  type?: string
+  base_model?: string
+  description?: string
+  tags?: string[]
+  nsfw?: boolean
+  downloads?: number
+  likes?: number
+  published_at?: string
+  updated_at?: string
+  page_url?: string
+  thumbnail_url?: string
+  trigger_words?: string[]
+  files?: RemoteFile[]
+  local?: LocalMatch
+}
+
+export interface BrowseResults {
+  items: Listing[]
+  errors?: Record<string, string>
+  providers: string[]
+}
+
+export interface BrowseQuery {
+  q: string
+  providers: string[]
+  type: string[]
+  base_model: string[]
+  nsfw: boolean
+  sort: string
+  page: number
+}
+
+export const emptyBrowseQuery: BrowseQuery = {
+  q: '',
+  providers: [],
+  type: [],
+  base_model: [],
+  nsfw: false,
+  sort: 'downloads',
+  page: 1,
+}
+
+export function browse(q: BrowseQuery, limit = 24): Promise<BrowseResults> {
+  const params = new URLSearchParams()
+  if (q.q) params.set('q', q.q)
+  for (const p of q.providers) params.append('provider', p)
+  for (const t of q.type) params.append('type', t)
+  for (const b of q.base_model) params.append('base_model', b)
+  if (q.nsfw) params.set('nsfw', 'true')
+  if (q.sort) params.set('sort', q.sort)
+  params.set('page', String(q.page))
+  params.set('limit', String(limit))
+  return request<BrowseResults>(`/api/browse?${params}`)
+}
+
+// Thumbnails go through the daemon rather than straight to the provider CDN.
+// The page's CSP is img-src 'self', so a remote URL would be refused outright,
+// and fetching it directly would tell that CDN who is browsing and for what.
+export function remoteImageURL(url: string): string {
+  const params = new URLSearchParams({ url })
+  if (config.token) params.set('token', config.token)
+  return `/api/remote-image?${params}`
+}
+
+export interface Update {
+  provider: string
+  model_id: string
+  name: string
+  have_version_id?: string
+  have_version_name?: string
+  latest_version_id: string
+  latest_version_name?: string
+  published_at?: string
+  local_sha256?: string
+  local_path?: string
+  base_model?: string
+  size_bytes?: number
+  download_url?: string
+  page_url?: string
+  base_model_changed?: boolean
+}
+
+export interface UpdatesResults {
+  updates: Update[]
+  checked: number
+  errors: number
+}
+
+// No limit by default: the check is one request per owned model and the server
+// bounds it, so the UI does not also guess at a cap.
+export const checkUpdates = () => request<UpdatesResults>('/api/updates')
+
 export const getModel = (sha: string) => request<ModelDetail>(`/api/models/${sha}`)
 export const getCandidates = (sha: string) => request<CandidateView[]>(`/api/models/${sha}/candidates`)
 export const getFacets = () => request<Facets>('/api/facets')

@@ -70,3 +70,18 @@ func siteBase(apiBase string) string {
 	}
 	return trimmed
 }
+
+// ConfiguredHosts lists the hosts this client is pointed at.
+//
+// Used by the daemon to decide which image hosts it is willing to proxy: a
+// mirror or a test server configured through MM_*_API should work without
+// being special-cased anywhere else.
+func (c *Client) ConfiguredHosts() []string {
+	var out []string
+	for _, base := range []string{c.civitaiBase(), c.huggingFaceBase(), c.civArchiveBase()} {
+		if h := hostOf(base); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
+}

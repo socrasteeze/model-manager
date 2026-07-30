@@ -13,6 +13,7 @@ import (
 
 	"github.com/socrasteeze/model-manager/internal/api"
 	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/webui"
 )
 
@@ -30,6 +31,7 @@ disk should not be reachable from a shared LAN without one.`)
 	host := fs_.String("host", "127.0.0.1", "interface to bind")
 	port := fs_.Int("port", 8737, "port to listen on")
 	writable := fs_.Bool("writable", false, "allow edits (Phase 1 defaults to read-only until the index is proven)")
+	noRemote := fs_.Bool("no-remote", false, "disable remote browsing and update checking (no outbound requests)")
 	tailnet := fs_.Bool("tailnet", false, "trust Tailscale addresses without a token")
 	tokenPath := fs_.String("token-file", "", "where to read/write the API token (default: alongside the database)")
 	noToken := fs_.Bool("no-token", false, "do not require a token even when bound off-loopback (unsafe)")
@@ -90,6 +92,14 @@ disk should not be reachable from a shared LAN without one.`)
 				"    this port can read every model file this daemon can see.")
 	}
 
+	// Browsing and update checking are the only features that make outbound
+	// requests. Leaving the client unset is how an operator keeps the daemon
+	// from talking to third parties at all, without needing a firewall rule.
+	var originClient *origin.Client
+	if !*noRemote {
+		originClient = origin.NewClient()
+	}
+
 	srv := api.New(api.Config{
 		Store:    st,
 		Blobs:    blobs,
@@ -97,6 +107,7 @@ disk should not be reachable from a shared LAN without one.`)
 		Security: sec,
 		Version:  version,
 		ReadOnly: !*writable,
+		Origin:   originClient,
 	})
 
 	listener, err := net.Listen("tcp", addr.String())
