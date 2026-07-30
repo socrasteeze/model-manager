@@ -37,6 +37,15 @@ All phases implemented. One static binary, no services, no configuration.
 | 5 | Sidecar projection | [phase4-5](docs/phase4-5.md) |
 | 6 | Remote browsing across Civitai/CivArchive/HuggingFace, update checking, downloads from the UI | [phase6](docs/phase6.md) |
 
+## Install
+
+Download the binary for your platform from the
+[latest release](../../releases/latest) — one file, nothing to install. Windows
+users want `mm-windows-amd64.exe` (rename it to `mm.exe`) plus `start.bat`.
+
+Verify it against `SHA256SUMS.txt` if you like. On Windows the executable is
+unsigned, so right-click → Properties → **Unblock** before the first run.
+
 ## Build
 
 ```sh
@@ -45,6 +54,10 @@ make test
 make ui             # rebuild the web UI (needs Node; the built output is committed)
 make release        # cross-compiled matrix -> bin/mm-<os>-<arch>
 ```
+
+Binaries are published as release assets rather than committed. Pushing a tag
+(`git tag v0.1.0 && git push origin v0.1.0`) builds all five targets and attaches
+them, with checksums, via `.github/workflows/release.yml`.
 
 Go 1.24+. No cgo, no external toolchain, no service to run — the SQLite driver is
 pure Go, so `GOOS`/`GOARCH` builds every target from one machine.

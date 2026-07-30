@@ -1,0 +1,81 @@
+name: release
+
+# Builds the binaries and attaches them to a GitHub Release.
+#
+# Binaries are published here rather than committed. Git keeps every version of
+# a file forever, so a 12 MB executable per rebuild would grow the repository
+# permanently and could only be removed by rewriting history. Release assets are
+# built from a tagged commit, downloadable without a clone, and deletable.
+#
+# Trigger it by pushing a tag:
+#
+#     git tag v0.1.0
+#     git push origin v0.1.0
+#
+# or run it by hand from the Actions tab.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The UI is committed in built form, so no Node toolchain is needed here.
+      # Tests run before anything is published: a release that fails its own
+      # test suite should never acquire a download link.
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build every target
+        env:
+          CGO_ENABLED: 0
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          mkdir -p dist
+          # Pure Go with cgo off, so one runner cross-compiles the whole matrix.
+          for target in linux/amd64 linux/arm64 windows/amd64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            ext=""; [ "$os" = "windows" ] && ext=".exe"
+            out="dist/mm-${os}-${arch}${ext}"
+            echo "building $out"
+            GOOS="$os" GOARCH="$arch" go build \
+              -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "$out" ./cmd/mm
+          done
+
+          # Ship the Windows launcher beside the Windows binary, and name it so
+          # it lands next to mm.exe when both are downloaded.
+          cp start.bat dist/start.bat
+
+          # Checksums, so a download can be verified rather than trusted.
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+          ls -la dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*
