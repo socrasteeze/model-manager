@@ -1,3 +1,4 @@
+[![release](https://github.com/socrasteeze/model-manager/actions/workflows/release.yml/badge.svg)](https://github.com/socrasteeze/model-manager/actions/workflows/release.yml)
 # Model Manager
 
 An independent metadata authority and organization layer for a local AI model
