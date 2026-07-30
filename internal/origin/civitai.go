@@ -383,6 +383,15 @@ func normalizeCivitaiType(v string) string {
 // nothing alike in practice.
 func normalizeCivitaiBase(v string) string {
 	s := strings.ToLower(strings.TrimSpace(v))
+
+	// HuggingFace spells base models as repo names ("stable-diffusion-xl-base-1.0",
+	// "stable-diffusion-v1-5") where Civitai uses short labels ("SDXL", "SD 1.5").
+	// Flattening the separators lets one set of cases cover both, which is what
+	// makes a base-model filter chosen from local facets mean the same thing on
+	// either provider.
+	s = strings.NewReplacer("-", " ", "_", " ", ".", " ").Replace(s)
+	s = strings.Join(strings.Fields(s), " ")
+
 	switch {
 	case s == "":
 		return ""
@@ -392,15 +401,19 @@ func normalizeCivitaiBase(v string) string {
 		return "Illustrious"
 	case strings.Contains(s, "noobai"):
 		return "NoobAI"
-	case strings.Contains(s, "sdxl") || strings.Contains(s, "sd xl"):
+	case strings.Contains(s, "sdxl") || strings.Contains(s, "sd xl"),
+		strings.Contains(s, "stable diffusion xl"):
 		return "SDXL"
 	case strings.Contains(s, "flux"):
 		return "Flux"
-	case strings.Contains(s, "sd 3") || strings.Contains(s, "sd3"):
+	case strings.Contains(s, "sd 3") || strings.Contains(s, "sd3"),
+		strings.Contains(s, "stable diffusion 3"), strings.Contains(s, "stable diffusion v3"):
 		return "SD 3"
-	case strings.Contains(s, "sd 1"):
+	case strings.Contains(s, "sd 1"),
+		strings.Contains(s, "stable diffusion v1"), strings.Contains(s, "stable diffusion 1"):
 		return "SD 1.5"
-	case strings.Contains(s, "sd 2"):
+	case strings.Contains(s, "sd 2"),
+		strings.Contains(s, "stable diffusion v2"), strings.Contains(s, "stable diffusion 2"):
 		return "SD 2.x"
 	}
 	return strings.TrimSpace(v)

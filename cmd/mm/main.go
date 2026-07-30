@@ -51,6 +51,8 @@ COMMANDS
     interpret  Turn stored headers into typed metadata (reads no model files)
     ingest     Read other tools' sidecars beside model files (read-only)
     enrich     Look models up on Civitai by hash and archive the result
+    browse     Search Civitai, CivArchive and HuggingFace for models
+    updates    Report which models have a newer version published
     get        Download a model from a URL, resumable and verified
     view       Define and generate organized views (non-destructive)
     tier       Stage hot models onto fast storage
@@ -87,6 +89,10 @@ func main() {
 		err = cmdIngest(ctx, os.Args[2:])
 	case "enrich":
 		err = cmdEnrich(ctx, os.Args[2:])
+	case "browse":
+		err = cmdBrowse(ctx, os.Args[2:])
+	case "updates":
+		err = cmdUpdates(ctx, os.Args[2:])
 	case "get":
 		err = cmdGet(ctx, os.Args[2:])
 	case "view":

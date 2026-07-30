@@ -346,6 +346,51 @@ func (r *Registry) SearchAll(ctx context.Context, ids []string, q Query) ([]List
 	return out, errs
 }
 
+// ResolveFiles fills in file details for listings whose search response carried
+// no content hashes.
+//
+// Needed for correctness, not polish. HuggingFace's search response lists
+// filenames but no hashes, so without this every HuggingFace result would be
+// reported as "new" even when the exact file is already on disk -- prompting
+// precisely the duplicate download this project exists to prevent.
+//
+// Costs one request per listing, so it is capped and skipped for providers that
+// already supplied hashes. Listings are resolved in order, and a failure leaves
+// that listing's files as they were rather than aborting the batch.
+func (r *Registry) ResolveFiles(ctx context.Context, items []Listing, max int) {
+	if max <= 0 {
+		max = 25
+	}
+	done := 0
+	for i := range items {
+		if done >= max || ctx.Err() != nil {
+			return
+		}
+		if hasAnyHash(items[i]) {
+			continue
+		}
+		p, ok := r.Get(items[i].Provider)
+		if !ok {
+			continue
+		}
+		files, err := p.Files(ctx, items[i])
+		if err != nil || len(files) == 0 {
+			continue
+		}
+		items[i].Files = files
+		done++
+	}
+}
+
+func hasAnyHash(l Listing) bool {
+	for _, f := range l.Files {
+		if f.SHA256 != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // sortListings gives a merged multi-provider result set one consistent order.
 //
 // Only applied across providers; within a provider the server's own ordering is
