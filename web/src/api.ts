@@ -297,6 +297,44 @@ export function remoteImageURL(url: string): string {
   return `/api/remote-image?${params}`
 }
 
+// Downloads.
+//
+// The destination is never free text. The server only accepts a root it has
+// already scanned, so the UI offers a choice from the list it publishes rather
+// than letting anyone type a path.
+
+export interface DownloadJob {
+  id: string
+  url: string
+  dest_dir: string
+  filename: string
+  expected_sha256?: string
+  state: 'pending' | 'downloading' | 'verifying' | 'complete' | 'failed' | 'quarantined' | 'cancelled'
+  downloaded: number
+  total: number
+  error?: string
+  actual_sha256?: string
+  final_path?: string
+}
+
+export interface StartDownload {
+  url: string
+  dest_root: string
+  subdir?: string
+  filename?: string
+  sha256?: string
+  size?: number
+}
+
+export const downloadRoots = () => request<string[]>('/api/downloads/roots')
+export const listDownloads = () => request<DownloadJob[]>('/api/downloads')
+
+export const startDownload = (req: StartDownload) =>
+  request<{ status: string; dest_dir: string }>('/api/downloads', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
+
 export interface Update {
   provider: string
   model_id: string

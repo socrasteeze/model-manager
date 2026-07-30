@@ -119,9 +119,12 @@ that is not its own.
 
 ## HTTP API
 
-    GET /api/browse?q=&provider=&type=&base_model=&sort=&page=&nsfw=
-    GET /api/updates
-    GET /api/remote-image?url=
+    GET  /api/browse?q=&provider=&type=&base_model=&sort=&page=&nsfw=
+    GET  /api/updates
+    GET  /api/remote-image?url=
+    POST /api/downloads
+    GET  /api/downloads
+    GET  /api/downloads/roots
 
 These are the only endpoints that make outbound requests. `mm serve --no-remote`
 disables all three, which is how an operator keeps the daemon from talking to
@@ -140,6 +143,47 @@ capped, and the content is sniffed rather than trusted from the response header.
 Nothing is persisted: these are previews for models that are not owned, and
 writing them into the blob store would fill it with images for files that were
 never downloaded.
+
+## Downloading from the UI
+
+`POST /api/downloads` starts a transfer; `GET /api/downloads` reports progress
+for polling. The Browse tab shows a destination picker, a Download button on
+anything not already owned, and a progress bar per transfer.
+
+This is the most dangerous endpoint in the daemon — left naive it is a remote
+primitive for "fetch an arbitrary URL and write it anywhere on this filesystem"
+— so three independent checks run before any byte moves.
+
+1. **It is a mutation.** Refused in read-only mode like any other write, and the
+   manager is only constructed when the daemon is started `--writable`.
+2. **The source host must be a known provider.** A URL is not accepted merely
+   for being well-formed. Matching is by domain suffix, so `civitai.com` passes
+   and `civitai.com.attacker.net` does not.
+3. **The destination must already be a scanned model root.** It is never
+   inferred from the URL, the filename, or a default. The server publishes the
+   legal roots at `/api/downloads/roots` and the client picks one; anything
+   else is refused. A requested subdirectory has traversal segments stripped,
+   and containment is re-checked after symlink resolution, so a subdirectory
+   that is a symlink out of the tree cannot be used to escape.
+
+The standing guarantee still holds: nothing existing is modified. A download
+landing on a name already taken is given a new name rather than replacing what
+is there, and a file whose hash does not match what was expected is left in the
+quarantine directory and never published into the model root at all.
+
+One limit worth stating plainly: the host check constrains where the request is
+*sent*. Transfers follow redirects — they must, since HuggingFace resolve URLs
+redirect to per-region CDN hosts — and redirect targets are not re-checked. So
+this bounds who you can ask, not every host ultimately contacted. What makes
+that acceptable is that the response is written to a quarantine file and
+verified against an expected hash rather than returned to the caller.
+
+A completed download is indexed immediately through the same tier-3 path a scan
+uses (`scan.IndexFile`), so it appears in the library without a manual rescan
+and browse flips it from `new` to `have`. Sharing that code path matters: a
+separate implementation would give the file a subtly different identity — a
+different weights hash, or a path row missing the `(device, inode)` key that
+makes re-scans cheap — and it would surface later as a phantom duplicate.
 
 ## What listings are not
 
@@ -162,8 +206,8 @@ Owned results deliberately do not get a download command.
 
 ## Known gaps
 
+- Redirect targets during a transfer are not host-checked (see above).
 - Update checking covers Civitai only. HuggingFace repos have no version
   identity, so "newer" would have to mean `lastModified` moving, which is a
   weaker claim than a version id changing.
-- Downloads are not yet driven from the UI; it emits the command to run.
 - CivArchive endpoints need one live confirmation run (see above).

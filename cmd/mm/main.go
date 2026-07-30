@@ -361,6 +361,13 @@ func defaultBlobDir(dbPath string) string {
 	return filepath.Join(filepath.Dir(dbPath), "blobs")
 }
 
+// defaultDownloadDir is the quarantine for partial transfers. Beside the
+// database rather than in the destination, so a half-written file is never
+// visible in a model root where a tool might pick it up.
+func defaultDownloadDir(dbPath string) string {
+	return filepath.Join(filepath.Dir(dbPath), "downloads")
+}
+
 // --- detect ------------------------------------------------------------------
 
 func cmdDetect(args []string) error {

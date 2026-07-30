@@ -13,6 +13,7 @@ import (
 
 	"github.com/socrasteeze/model-manager/internal/api"
 	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/download"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/webui"
 )
@@ -100,14 +101,28 @@ disk should not be reachable from a shared LAN without one.`)
 		originClient = origin.NewClient()
 	}
 
+	// Downloading additionally requires --writable. It creates files, and the
+	// read-only default exists precisely so a daemon cannot be talked into
+	// writing anything before the index is proven.
+	var downloads *download.Manager
+	if !*noRemote && *writable {
+		mgr, err := download.NewManager(defaultDownloadDir(st.Path()))
+		if err != nil {
+			return fmt.Errorf("serve: preparing downloads: %w", err)
+		}
+		mgr.APIKey = os.Getenv("CIVITAI_API_KEY")
+		downloads = mgr
+	}
+
 	srv := api.New(api.Config{
 		Store:    st,
 		Blobs:    blobs,
 		UI:       embeddedUI(),
 		Security: sec,
 		Version:  version,
-		ReadOnly: !*writable,
-		Origin:   originClient,
+		ReadOnly:  !*writable,
+		Origin:    originClient,
+		Downloads: downloads,
 	})
 
 	listener, err := net.Listen("tcp", addr.String())

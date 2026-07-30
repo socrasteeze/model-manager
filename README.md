@@ -35,7 +35,7 @@ All phases implemented. One static binary, no services, no configuration.
 | 3 | Link-strategy engine and generated views | [phase3](docs/phase3.md) |
 | 4 | SSD tiering | [phase4-5](docs/phase4-5.md) |
 | 5 | Sidecar projection | [phase4-5](docs/phase4-5.md) |
-| 6 | Remote browsing across Civitai/CivArchive/HuggingFace, update checking | [phase6](docs/phase6.md) |
+| 6 | Remote browsing across Civitai/CivArchive/HuggingFace, update checking, downloads from the UI | [phase6](docs/phase6.md) |
 
 ## Build
 
@@ -59,6 +59,7 @@ mm interpret                                 # headers -> typed metadata (no dis
 mm ingest                                    # read other tools' sidecars
 mm report                                    # distinct models, duplication, size spread
 mm serve                                     # browse at http://127.0.0.1:8737
+mm serve --writable                          # ...and download from the Browse tab
 ```
 
 Then, once the index is proven:
@@ -97,14 +98,21 @@ mm project --target stability-matrix         # write sidecars back out
 ## Guarantees
 
 - **Never modifies, moves, renames, or deletes an existing model file.** Model
-  files are opened read-only. The only files created are ones you asked for:
-  downloads at a destination you chose, view entries, tier copies, and sidecars.
+  files are opened read-only. A download that lands on a name already taken is
+  given a new name rather than replacing what is there. The files this tool
+  creates are the ones you asked for — downloads at a destination you chose,
+  view entries, tier copies, and sidecars — plus its own state: the SQLite
+  database beside it, the preview-image store written by `enrich`, and transient
+  partial-download and probe files that are cleaned up after use.
 - **Reports duplicates, never deletes them.** Surfacing them is the feature.
 - **Manual metadata is never overwritten by any ingest.** When an origin later
   disagrees, that surfaces as a suggestion with one-click accept, not a silent
   replacement.
-- **Fully offline except enrichment.** Everything but Civitai/HF lookup works
-  with no network at all.
+- **Offline except where you ask it to reach out.** Four commands make network
+  requests — `enrich`, `browse`, `updates`, and `get` — along with the daemon's
+  `/api/browse`, `/api/updates` and `/api/remote-image` endpoints, which
+  `mm serve --no-remote` disables outright. Everything else works with no
+  network at all.
 - **Binds `127.0.0.1` by default**, with a Host allowlist against DNS rebinding
   and no CORS wildcard. A token is required off-loopback.
 - **The database is a single file** you can copy, which is what makes the
@@ -121,7 +129,8 @@ internal/scan           Root walking, cache tiers, per-device workers
 internal/provenance     Which of several competing values for a field wins
 internal/interpret      Stored headers and paths -> typed observations
 internal/ingest         Other tools' sidecars, read-only
-internal/origin         Civitai / HuggingFace lookup and permanent archive
+internal/origin         Civitai / CivArchive / HuggingFace: hash lookup, permanent
+                        archive, remote search, and update detection
 internal/download       Resumable, verified, quarantined transfers
 internal/link           Reflink / block-clone / symlink / hardlink / copy
 internal/view           Generated directory trees over the library

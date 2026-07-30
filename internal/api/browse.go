@@ -258,6 +258,14 @@ func (s *Server) imageHostAllowed(host string) bool {
 	}
 	// Also allow whatever provider hosts this server is configured against, so
 	// a mirror or a test server works without special-casing.
+	//
+	// Nil-checked because this is reached from the download path too, which can
+	// be enabled without an origin client. handleRemoteImage guards earlier;
+	// downloadHostAllowed does not, and a nil dereference here would take out
+	// the request rather than simply denying the host.
+	if s.cfg.Origin == nil {
+		return false
+	}
 	for _, base := range s.cfg.Origin.ConfiguredHosts() {
 		if h == base {
 			return true

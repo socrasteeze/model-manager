@@ -2,11 +2,16 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   browse,
   checkUpdates,
+  config,
+  downloadRoots,
   emptyBrowseQuery,
   formatBytes,
+  listDownloads,
   remoteImageURL,
+  startDownload,
   type BrowseQuery,
   type BrowseResults,
+  type DownloadJob,
   type Listing,
   type RemoteFile,
   type Update,
@@ -29,6 +34,34 @@ export function BrowsePanel() {
   const [error, setError] = useState<string | null>(null)
   const [updates, setUpdates] = useState<Update[] | null>(null)
   const [checking, setChecking] = useState(false)
+  const [roots, setRoots] = useState<string[]>([])
+  const [destRoot, setDestRoot] = useState('')
+  const [jobs, setJobs] = useState<DownloadJob[]>([])
+
+  // Downloading needs a writable server and at least one scanned root to put
+  // things in; without both the UI offers the command to run instead.
+  const canDownload = !config.readOnly && roots.length > 0
+
+  useEffect(() => {
+    downloadRoots()
+      .then((r) => {
+        setRoots(r)
+        setDestRoot((cur) => cur || r[0] || '')
+      })
+      .catch(() => setRoots([]))
+  }, [])
+
+  // Poll only while something is in flight. A finished queue must not keep the
+  // daemon busy answering for a tab nobody is looking at.
+  const active = jobs.some((j) => j.state === 'pending' || j.state === 'downloading' || j.state === 'verifying')
+  useEffect(() => {
+    if (!canDownload) return
+    const tick = () => listDownloads().then(setJobs).catch(() => {})
+    tick()
+    if (!active) return
+    const timer = setInterval(tick, 1000)
+    return () => clearInterval(timer)
+  }, [canDownload, active])
 
   const run = useCallback((q: BrowseQuery) => {
     setLoading(true)
@@ -144,9 +177,38 @@ export function BrowsePanel() {
 
       {updates && <UpdateList updates={updates} onClose={() => setUpdates(null)} />}
 
+      {canDownload ? (
+        <div className="dest-row">
+          <label>
+            Download to
+            <select value={destRoot} onChange={(e) => setDestRoot(e.target.value)}>
+              {roots.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </label>
+          {jobs.length > 0 && <DownloadQueue jobs={jobs} />}
+        </div>
+      ) : (
+        <p className="source-note">
+          {config.readOnly
+            ? 'Read-only: start the daemon with --writable to download from here.'
+            : 'No scanned model roots yet, so there is nowhere to download to. Run a scan first.'}
+        </p>
+      )}
+
       <div className="listing-grid">
         {results?.items.map((l) => (
-          <ListingCard key={`${l.provider}:${l.id}:${l.version_id ?? ''}`} listing={l} />
+          <ListingCard
+            key={`${l.provider}:${l.id}:${l.version_id ?? ''}`}
+            listing={l}
+            destRoot={destRoot}
+            canDownload={canDownload}
+            job={jobFor(jobs, l)}
+            onStarted={() => listDownloads().then(setJobs).catch(() => {})}
+          />
         ))}
       </div>
 
@@ -172,9 +234,23 @@ export function BrowsePanel() {
   )
 }
 
-function ListingCard({ listing }: { listing: Listing }) {
+function ListingCard({
+  listing,
+  destRoot,
+  canDownload,
+  job,
+  onStarted,
+}: {
+  listing: Listing
+  destRoot: string
+  canDownload: boolean
+  job?: DownloadJob
+  onStarted: () => void
+}) {
   const status = listing.local?.status ?? 'new'
   const file = pickFile(listing.files)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
 
   return (
     <article className={`listing ${status}`}>
@@ -219,11 +295,43 @@ function ListingCard({ listing }: { listing: Listing }) {
           </p>
         )}
 
+        {job && <JobProgress job={job} />}
+        {err && <div className="error inline">{err}</div>}
+
         <div className="listing-actions">
+          {file?.download_url && status !== 'have' && canDownload && !job && (
+            <button
+              className="primary"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true)
+                setErr(null)
+                try {
+                  await startDownload({
+                    url: file.download_url!,
+                    dest_root: destRoot,
+                    // Group by type so a download lands where the tool that
+                    // reads this root already expects to find it.
+                    subdir: listing.type ? `${listing.type}s` : undefined,
+                    filename: file.name,
+                    sha256: file.sha256,
+                    size: file.size_bytes,
+                  })
+                  onStarted()
+                } catch (e) {
+                  setErr((e as Error).message)
+                } finally {
+                  setBusy(false)
+                }
+              }}
+            >
+              {busy ? 'Starting…' : 'Download'}
+            </button>
+          )}
           {file?.download_url && status !== 'have' && (
             <CopyButton
               value={`mm get ${file.download_url}`}
-              label="Copy download command"
+              label="Copy command"
               className="ghost"
             />
           )}
@@ -291,6 +399,57 @@ function UpdateList({ updates, onClose }: { updates: Update[]; onClose: () => vo
         </div>
       ))}
     </section>
+  )
+}
+
+// jobFor matches a listing to an in-flight download by URL, which is the only
+// identifier the two sides share.
+function jobFor(jobs: DownloadJob[], listing: Listing): DownloadJob | undefined {
+  const urls = new Set((listing.files ?? []).map((f) => f.download_url).filter(Boolean))
+  return jobs.find((j) => urls.has(j.url))
+}
+
+function JobProgress({ job }: { job: DownloadJob }) {
+  const pct = job.total > 0 ? Math.min(100, (job.downloaded / job.total) * 100) : 0
+
+  if (job.state === 'complete') {
+    return <p className="source-note">Downloaded to {job.final_path}</p>
+  }
+  if (job.state === 'failed' || job.state === 'quarantined') {
+    // Quarantined means the bytes arrived but the hash did not match, so the
+    // file was never published into the model root.
+    return (
+      <p className="warn-note">
+        {job.state === 'quarantined' ? 'Checksum mismatch — not installed. ' : 'Failed. '}
+        {job.error}
+      </p>
+    )
+  }
+  return (
+    <div className="progress">
+      <div className="progress-bar">
+        <span style={{ width: `${pct}%` }} />
+      </div>
+      <span className="progress-label">
+        {job.state === 'verifying'
+          ? 'verifying…'
+          : `${formatBytes(job.downloaded)}${job.total > 0 ? ` / ${formatBytes(job.total)}` : ''}`}
+      </span>
+    </div>
+  )
+}
+
+function DownloadQueue({ jobs }: { jobs: DownloadJob[] }) {
+  const done = jobs.filter((j) => j.state === 'complete').length
+  const failed = jobs.filter((j) => j.state === 'failed' || j.state === 'quarantined').length
+  const running = jobs.length - done - failed
+  return (
+    <span className="source-note">
+      {running > 0 && `${running} downloading`}
+      {running > 0 && (done > 0 || failed > 0) && ' · '}
+      {done > 0 && `${done} done`}
+      {failed > 0 && ` · ${failed} failed`}
+    </span>
   )
 }
 

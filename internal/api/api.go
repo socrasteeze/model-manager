@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/download"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
@@ -32,6 +33,11 @@ type Config struct {
 
 	// Version is reported by /api/health.
 	Version string
+
+	// Downloads enables fetching models. Nil disables the download endpoints
+	// entirely, which is the default for a server that has no business writing
+	// new files onto the array.
+	Downloads *download.Manager
 
 	// Origin enables remote browsing and update checking. Nil disables both
 	// endpoints: those are the only ones that make outbound requests, so an
@@ -85,6 +91,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/browse", s.handleBrowse)
 	s.mux.HandleFunc("GET /api/updates", s.handleUpdates)
 	s.mux.HandleFunc("GET /api/remote-image", s.handleRemoteImage)
+
+	s.mux.HandleFunc("POST /api/downloads", s.handleCreateDownload)
+	s.mux.HandleFunc("GET /api/downloads", s.handleListDownloads)
+	s.mux.HandleFunc("GET /api/downloads/roots", s.handleDownloadRoots)
 
 	s.mux.HandleFunc("GET /api/facets", s.handleFacets)
 	s.mux.HandleFunc("GET /api/tags", s.handleTags)
