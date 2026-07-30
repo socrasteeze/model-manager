@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +16,19 @@ import (
 	"github.com/socrasteeze/model-manager/internal/store"
 )
 
-// CivitaiBaseURL is the API root. Overridable for testing.
+// CivitaiBaseURL is the default API root. Overridable for testing, and at
+// runtime per-client via MM_CIVITAI_API.
+//
+// Civitai serves the same API over several hosts that differ in which catalogue
+// they expose: civitai.com is the main site, civitai.red is the adult split and
+// civitai.green the safe-for-work one. Which host you point at therefore decides
+// what a search can return, so this is a setting rather than a constant.
+//
+// Pointing directly at the right host also matters for authentication. Go strips
+// the Authorization header when a redirect crosses to a different registered
+// domain (net/http.Client.makeHeadersCopier), so reaching .red by way of a .com
+// redirect would silently drop the API key and fail as a bare 401 with nothing
+// to explain it.
 var CivitaiBaseURL = "https://civitai.com/api/v1"
 
 // ErrRateLimited means the server asked us to slow down.
@@ -28,6 +41,16 @@ type Client struct {
 	// APIKey authenticates for models gated behind a Civitai login. Optional for
 	// metadata, required for some downloads.
 	APIKey string
+
+	// HFToken authenticates to HuggingFace. Only needed for gated or private
+	// repos; public metadata and downloads work without one.
+	HFToken string
+
+	// Per-client API roots. Empty means "use the package default", which is what
+	// keeps the existing test overrides of the package vars working.
+	CivitaiBase     string
+	HuggingFaceBase string
+	CivArchiveBase  string
 
 	// MinInterval throttles requests. 19k lookups against a public API is a
 	// volume that gets an IP blocked if it arrives all at once (spec §12).
@@ -42,13 +65,54 @@ type Client struct {
 }
 
 // NewClient returns a client with sane defaults.
+//
+// Credentials and API roots are read from the environment rather than stored in
+// the database. A token in the master DB would end up in every backup and every
+// copy of the library; leaving it in the environment keeps the secret owned by
+// the shell that launched the process.
 func NewClient() *Client {
 	return &Client{
-		HTTP:        &http.Client{Timeout: 30 * time.Second},
-		MinInterval: 350 * time.Millisecond,
-		MaxRetries:  4,
-		UserAgent:   "model-manager/1.0 (+https://github.com/socrasteeze/model-manager)",
+		HTTP:            &http.Client{Timeout: 30 * time.Second},
+		MinInterval:     350 * time.Millisecond,
+		MaxRetries:      4,
+		UserAgent:       "model-manager/1.0 (+https://github.com/socrasteeze/model-manager)",
+		APIKey:          os.Getenv("CIVITAI_API_KEY"),
+		HFToken:         firstEnv("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"),
+		CivitaiBase:     os.Getenv("MM_CIVITAI_API"),
+		HuggingFaceBase: os.Getenv("MM_HUGGINGFACE_API"),
+		CivArchiveBase:  os.Getenv("MM_CIVARCHIVE_API"),
 	}
+}
+
+// civitaiBase resolves the Civitai API root for this client.
+func (c *Client) civitaiBase() string {
+	return strings.TrimRight(orDefaultStr(c.CivitaiBase, CivitaiBaseURL), "/")
+}
+
+// huggingFaceBase resolves the HuggingFace API root for this client.
+func (c *Client) huggingFaceBase() string {
+	return strings.TrimRight(orDefaultStr(c.HuggingFaceBase, HuggingFaceBaseURL), "/")
+}
+
+// civArchiveBase resolves the CivArchive API root for this client.
+func (c *Client) civArchiveBase() string {
+	return strings.TrimRight(orDefaultStr(c.CivArchiveBase, CivArchiveBaseURL), "/")
+}
+
+func orDefaultStr(v, fallback string) string {
+	if strings.TrimSpace(v) != "" {
+		return v
+	}
+	return fallback
+}
+
+func firstEnv(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // CivitaiVersion is the subset of the model-version response worth typing.
@@ -99,7 +163,7 @@ type CivitaiVersion struct {
 // which is the bonus §2 calls out: no name matching, no guessing, no fuzzy
 // resolution that could bind the wrong record.
 func (c *Client) LookupCivitaiByHash(ctx context.Context, sha256 string) (json.RawMessage, int, error) {
-	url := fmt.Sprintf("%s/model-versions/by-hash/%s", CivitaiBaseURL, strings.ToUpper(sha256))
+	url := fmt.Sprintf("%s/model-versions/by-hash/%s", c.civitaiBase(), strings.ToUpper(sha256))
 	return c.getJSON(ctx, url)
 }
 
@@ -118,8 +182,9 @@ func (c *Client) getJSON(ctx context.Context, url string) (json.RawMessage, int,
 		}
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", c.UserAgent)
-		if c.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+c.APIKey)
+		// Scoped by host: see auth.go. Never send one provider's key to another.
+		if token := c.tokenFor(url); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 
 		resp, err := c.HTTP.Do(req)

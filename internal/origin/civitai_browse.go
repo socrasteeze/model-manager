@@ -1,0 +1,377 @@
+package origin
+
+// Civitai search.
+//
+// The by-hash lookup in civitai.go answers "what is this file?". This answers
+// "what exists?", which is the model-browser half of the feature and a wholly
+// different endpoint shape: /models returns models, each carrying nested
+// versions, each carrying files.
+//
+// The nesting is why a Listing is flattened to the *version* rather than the
+// model. A model is an abstract thing with no hash and nothing to download; a
+// version is the unit that has files, a base model, trigger words and an
+// identity you can compare against what is already on disk.
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
+)
+
+// CivitaiProvider searches Civitai.
+type CivitaiProvider struct{ Client *Client }
+
+func (p *CivitaiProvider) ID() string          { return ProviderCivitaiID }
+func (p *CivitaiProvider) DisplayName() string { return "Civitai" }
+
+// civitaiSearchResponse is the /models envelope.
+type civitaiSearchResponse struct {
+	Items    []civitaiSearchModel `json:"items"`
+	Metadata struct {
+		TotalItems  int    `json:"totalItems"`
+		CurrentPage int    `json:"currentPage"`
+		PageSize    int    `json:"pageSize"`
+		TotalPages  int    `json:"totalPages"`
+		NextCursor  any    `json:"nextCursor"`
+		NextPage    string `json:"nextPage"`
+	} `json:"metadata"`
+}
+
+type civitaiSearchModel struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	NSFW bool   `json:"nsfw"`
+	Tags []string `json:"tags"`
+	Description string `json:"description"`
+	Creator     struct {
+		Username string `json:"username"`
+	} `json:"creator"`
+	Stats struct {
+		DownloadCount int64 `json:"downloadCount"`
+		ThumbsUpCount int64 `json:"thumbsUpCount"`
+		FavoriteCount int64 `json:"favoriteCount"`
+	} `json:"stats"`
+	ModelVersions []civitaiSearchVersion `json:"modelVersions"`
+}
+
+type civitaiSearchVersion struct {
+	ID           int64    `json:"id"`
+	Name         string   `json:"name"`
+	BaseModel    string   `json:"baseModel"`
+	Description  string   `json:"description"`
+	TrainedWords []string `json:"trainedWords"`
+	CreatedAt    string   `json:"createdAt"`
+	PublishedAt  string   `json:"publishedAt"`
+	DownloadURL  string   `json:"downloadUrl"`
+
+	Files []struct {
+		Name     string            `json:"name"`
+		SizeKB   float64           `json:"sizeKB"`
+		Type     string            `json:"type"`
+		Primary  bool              `json:"primary"`
+		Hashes   map[string]string `json:"hashes"`
+		Metadata struct {
+			Format string `json:"format"`
+		} `json:"metadata"`
+		DownloadURL string `json:"downloadUrl"`
+	} `json:"files"`
+
+	Images []struct {
+		URL  string `json:"url"`
+		NSFW any    `json:"nsfw"`
+	} `json:"images"`
+}
+
+// Search queries /models.
+func (p *CivitaiProvider) Search(ctx context.Context, q Query) (*Page, error) {
+	c := p.client()
+	endpoint := c.civitaiBase() + "/models?" + civitaiSearchParams(q).Encode()
+
+	raw, _, err := c.getJSON(ctx, endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("civitai: search: %w", err)
+	}
+	if raw == nil {
+		return &Page{}, nil
+	}
+
+	var resp civitaiSearchResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("civitai: decoding search response: %w", err)
+	}
+
+	page := &Page{Total: resp.Metadata.TotalItems}
+	for _, m := range resp.Items {
+		page.Items = append(page.Items, civitaiListings(m)...)
+	}
+	// nextCursor is typed loosely upstream: a string for some sort orders, a
+	// number for others, and absent at the end of the result set.
+	page.NextCursor = looseString(resp.Metadata.NextCursor)
+	if resp.Metadata.CurrentPage > 0 && resp.Metadata.CurrentPage < resp.Metadata.TotalPages {
+		page.NextPage = resp.Metadata.CurrentPage + 1
+	}
+	return page, nil
+}
+
+// civitaiSearchParams maps a provider-independent Query onto Civitai's filters.
+func civitaiSearchParams(q Query) url.Values {
+	v := url.Values{}
+	if q.Text != "" {
+		v.Set("query", q.Text)
+	}
+	for _, t := range q.Types {
+		if native := civitaiType(t); native != "" {
+			v.Add("types", native)
+		}
+	}
+	for _, b := range q.BaseModels {
+		v.Add("baseModels", b)
+	}
+	if sort := civitaiSort(q.Sort); sort != "" {
+		v.Set("sort", sort)
+	}
+
+	// The nsfw parameter is a ceiling, not a request: false excludes adult
+	// content, true permits it. Omitting it entirely lets the host's own
+	// default apply, which differs between civitai.com and civitai.red.
+	if !q.NSFW {
+		v.Set("nsfw", "false")
+	}
+
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 24
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	v.Set("limit", strconv.Itoa(limit))
+
+	// Cursor paging is preferred where available: /models by offset drifts as
+	// the index shifts, silently repeating and skipping items across pages.
+	switch {
+	case q.Cursor != "":
+		v.Set("cursor", q.Cursor)
+	case q.Page > 1:
+		v.Set("page", strconv.Itoa(q.Page))
+	}
+	return v
+}
+
+// civitaiType maps this project's type vocabulary to Civitai's.
+func civitaiType(t string) string {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "lora":
+		return "LORA"
+	case "lycoris":
+		return "LoCon"
+	case "checkpoint":
+		return "Checkpoint"
+	case "embedding", "textual inversion":
+		return "TextualInversion"
+	case "controlnet":
+		return "Controlnet"
+	case "vae":
+		return "VAE"
+	case "upscaler":
+		return "Upscaler"
+	case "hypernetwork":
+		return "Hypernetwork"
+	case "motion", "motionmodule":
+		return "MotionModule"
+	case "wildcards":
+		return "Wildcards"
+	case "poses":
+		return "Poses"
+	default:
+		return ""
+	}
+}
+
+// civitaiTypeToLocal is the inverse, for reading results back.
+func civitaiTypeToLocal(t string) string {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "lora":
+		return "lora"
+	case "locon", "lycoris", "dora":
+		return "lycoris"
+	case "checkpoint":
+		return "checkpoint"
+	case "textualinversion":
+		return "embedding"
+	case "controlnet":
+		return "controlnet"
+	case "vae":
+		return "vae"
+	case "upscaler":
+		return "upscaler"
+	case "hypernetwork":
+		return "hypernetwork"
+	default:
+		return strings.ToLower(t)
+	}
+}
+
+func civitaiSort(s string) string {
+	switch s {
+	case SortDownloads:
+		return "Most Downloaded"
+	case SortNewest:
+		return "Newest"
+	case SortRating:
+		return "Highest Rated"
+	default:
+		return ""
+	}
+}
+
+// civitaiListings flattens a model into one Listing per version.
+//
+// Every version is emitted, not just the newest. Older versions are frequently
+// the ones people actually want -- a v2 retrained on a different base is not an
+// upgrade -- and emitting them all is also what lets the annotator recognise an
+// owned older version and mark the newer one as an available update.
+func civitaiListings(m civitaiSearchModel) []Listing {
+	localType := civitaiTypeToLocal(m.Type)
+	out := make([]Listing, 0, len(m.ModelVersions))
+
+	for _, v := range m.ModelVersions {
+		l := Listing{
+			Provider:    ProviderCivitaiID,
+			ID:          strconv.FormatInt(m.ID, 10),
+			VersionID:   strconv.FormatInt(v.ID, 10),
+			VersionName: v.Name,
+			Name:        m.Name,
+			Author:      m.Creator.Username,
+			Type:        localType,
+			BaseModel:   normalizeCivitaiBase(v.BaseModel),
+			Description: stripHTML(firstNonEmpty(v.Description, m.Description)),
+			Tags:        dedupeStrings(m.Tags),
+			NSFW:        m.NSFW,
+			Downloads:   m.Stats.DownloadCount,
+			Likes:       m.Stats.ThumbsUpCount + m.Stats.FavoriteCount,
+			PublishedAt: firstNonEmpty(v.PublishedAt, v.CreatedAt),
+			UpdatedAt:   firstNonEmpty(v.PublishedAt, v.CreatedAt),
+			PageURL: fmt.Sprintf("https://civitai.com/models/%d?modelVersionId=%d",
+				m.ID, v.ID),
+			TriggerWords: dedupeStrings(v.TrainedWords),
+		}
+		if len(v.Images) > 0 {
+			l.ThumbnailURL = v.Images[0].URL
+		}
+		for _, f := range v.Files {
+			rf := RemoteFile{
+				Name:        f.Name,
+				SizeBytes:   int64(f.SizeKB * 1024),
+				Format:      firstNonEmpty(f.Metadata.Format, f.Type),
+				Primary:     f.Primary,
+				DownloadURL: firstNonEmpty(f.DownloadURL, v.DownloadURL),
+			}
+			// Hash keys are upper-case in the API but not contractually so.
+			for k, hv := range f.Hashes {
+				if strings.EqualFold(k, "SHA256") {
+					rf.SHA256 = strings.ToUpper(hv)
+					break
+				}
+			}
+			l.Files = append(l.Files, rf)
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// Files returns the listing's files, fetching the version if Search did not
+// include them.
+func (p *CivitaiProvider) Files(ctx context.Context, l Listing) ([]RemoteFile, error) {
+	if len(l.Files) > 0 {
+		return l.Files, nil
+	}
+	if l.VersionID == "" {
+		return nil, fmt.Errorf("civitai: listing has no version id")
+	}
+	c := p.client()
+	raw, _, err := c.getJSON(ctx, c.civitaiBase()+"/model-versions/"+url.PathEscape(l.VersionID))
+	if err != nil {
+		return nil, fmt.Errorf("civitai: fetching version %s: %w", l.VersionID, err)
+	}
+	if raw == nil {
+		return nil, nil
+	}
+
+	var v CivitaiVersion
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, fmt.Errorf("civitai: decoding version %s: %w", l.VersionID, err)
+	}
+	var out []RemoteFile
+	for _, f := range v.Files {
+		rf := RemoteFile{
+			Name:        f.Name,
+			SizeBytes:   int64(f.SizeKB * 1024),
+			Format:      firstNonEmpty(f.Metadata.Format, f.Type),
+			Primary:     f.Primary,
+			DownloadURL: firstNonEmpty(f.DownloadURL, v.DownloadURL),
+		}
+		for k, hv := range f.Hashes {
+			if strings.EqualFold(k, "SHA256") {
+				rf.SHA256 = strings.ToUpper(hv)
+				break
+			}
+		}
+		out = append(out, rf)
+	}
+	return out, nil
+}
+
+// LatestVersion returns the newest version of a Civitai model.
+//
+// Used by update checking: given a model id recorded when a file was enriched,
+// this is what the local copy is compared against.
+func (c *Client) LatestVersion(ctx context.Context, modelID string) (*Listing, error) {
+	raw, _, err := c.getJSON(ctx, c.civitaiBase()+"/models/"+url.PathEscape(modelID))
+	if err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		return nil, nil
+	}
+	var m civitaiSearchModel
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("civitai: decoding model %s: %w", modelID, err)
+	}
+	listings := civitaiListings(m)
+	if len(listings) == 0 {
+		return nil, nil
+	}
+	// The API returns versions newest-first; do not re-sort by date, because
+	// publishedAt is null for drafts and would sort them to the wrong end.
+	return &listings[0], nil
+}
+
+func (p *CivitaiProvider) client() *Client {
+	if p.Client != nil {
+		return p.Client
+	}
+	return NewClient()
+}
+
+// looseString renders a JSON value that may be a string or a number.
+func looseString(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case float64:
+		return strconv.FormatInt(int64(t), 10)
+	case json.Number:
+		return t.String()
+	default:
+		return ""
+	}
+}
+

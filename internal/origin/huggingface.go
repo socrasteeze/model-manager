@@ -42,7 +42,7 @@ type HFModel struct {
 
 // LookupHuggingFaceRepo fetches a repo's metadata.
 func (c *Client) LookupHuggingFaceRepo(ctx context.Context, repo string) (json.RawMessage, int, error) {
-	url := fmt.Sprintf("%s/models/%s", HuggingFaceBaseURL, strings.Trim(repo, "/"))
+	url := fmt.Sprintf("%s/models/%s", c.huggingFaceBase(), strings.Trim(repo, "/"))
 	return c.getJSON(ctx, url)
 }
 
