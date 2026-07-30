@@ -62,6 +62,12 @@ mm serve                                     # browse at http://127.0.0.1:8737
 mm serve --writable                          # ...and download from the Browse tab
 ```
 
+On Windows, `start.bat` does the last step for you: it finds `mm.exe` (or builds
+it if Go is installed), starts the daemon, and opens the browser once the port is
+actually listening. It runs writable so downloads work — `start.bat readonly` or
+`start.bat offline` if you would rather it not write or not reach the network.
+Port, database path and API keys are settings at the top of the file.
+
 Then, once the index is proven:
 
 ```sh
