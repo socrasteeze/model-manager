@@ -17,3 +17,9 @@
 # purpose: a distributable binary has to build without a Node toolchain.
 web/node_modules/
 web/tsconfig.tsbuildinfo
+
+# Scratch artifacts from local testing. These have leaked into a commit once
+# already, when a stray working directory sent a heredoc into web/.
+*.log
+shot.mjs
+holdopen.mjs
