@@ -52,7 +52,7 @@ const civitaiBody = `{
 // --- extraction ----------------------------------------------------------------
 
 func TestObservationsFromCivitai(t *testing.T) {
-	obs, tags, hashes, images := ObservationsFromCivitai(json.RawMessage(civitaiBody))
+	obs, tags, hashes, images := ObservationsFromCivitai(json.RawMessage(civitaiBody), "")
 
 	byField := map[string]any{}
 	for _, o := range obs {

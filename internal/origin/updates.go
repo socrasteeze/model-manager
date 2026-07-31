@@ -67,6 +67,13 @@ type UpdateStats struct {
 	Checked int
 	Found   int
 	Errors  int
+
+	// RateLimited means the provider cut the run short: the result covers
+	// only the models checked so far. Without this flag a truncated sweep is
+	// indistinguishable from "everything else is up to date", which is a
+	// wrong answer presented confidently.
+	RateLimited bool
+
 	Elapsed time.Duration
 }
 
@@ -106,6 +113,7 @@ func CheckUpdates(ctx context.Context, idx *LocalIndex, opts UpdateOptions) ([]U
 			stats.Errors++
 			logf("model %s: %v", modelID, err)
 			if isRateLimit(err) {
+				stats.RateLimited = true
 				logf("stopping early: the API is rate limiting. Re-run to continue.")
 				break
 			}
@@ -181,6 +189,9 @@ func (s *UpdateStats) Summary() string {
 	out := fmt.Sprintf("checked %d  updates %d", s.Checked, s.Found)
 	if s.Errors > 0 {
 		out += fmt.Sprintf("  errors %d", s.Errors)
+	}
+	if s.RateLimited {
+		out += "  (rate limited — partial result, re-run to continue)"
 	}
 	return out + fmt.Sprintf("  (%s)", s.Elapsed.Round(time.Second))
 }

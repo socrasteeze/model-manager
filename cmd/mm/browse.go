@@ -77,15 +77,20 @@ are downloaded and hashed.`)
 		registry.ResolveFiles(ctx, items, *limit)
 	}
 
-	// Annotating needs the library, but a search is still useful without one --
-	// browsing before the first scan is a legitimate thing to do.
-	if st, err := openStore(*dbPath, *allowNetDB); err == nil {
-		defer st.Close()
-		if idx, err := origin.BuildLocalIndex(st); err == nil {
-			idx.Annotate(items)
-		} else {
-			fmt.Fprintf(os.Stderr, "mm: could not index the library: %v\n", err)
-		}
+	// Annotating needs the library. A failure to open it is an error, not a
+	// silent degradation: without the index everything prints as "new",
+	// --new-only hides nothing, and the suggested-commands block invites
+	// re-downloading models already owned. A user who genuinely has no
+	// database yet points --db somewhere writable and gets an empty one.
+	st, err := openStore(*dbPath, *allowNetDB)
+	if err != nil {
+		return fmt.Errorf("browse: opening the library for have/update marking: %w", err)
+	}
+	defer st.Close()
+	if idx, err := origin.BuildLocalIndex(st); err == nil {
+		idx.Annotate(items)
+	} else {
+		fmt.Fprintf(os.Stderr, "mm: could not index the library: %v\n", err)
 	}
 
 	if *newOnly {
@@ -282,7 +287,10 @@ func splitList(s string) []string {
 }
 
 func filterListings(items []origin.Listing, keep func(origin.Listing) bool) []origin.Listing {
-	var out []origin.Listing
+	// Non-nil so --json emits [] rather than null for an empty result; a
+	// consumer iterating the array should not need a null guard for the
+	// perfectly ordinary case of "no new models".
+	out := []origin.Listing{}
 	for _, l := range items {
 		if keep(l) {
 			out = append(out, l)

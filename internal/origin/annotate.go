@@ -17,6 +17,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/socrasteeze/model-manager/internal/store"
@@ -106,28 +108,77 @@ func (idx *LocalIndex) loadOwnedVersions(st *store.Store) error {
 			continue
 		}
 
-		// The cached body for a by-hash lookup is a model *version*, which
-		// carries its parent model id -- exactly the pair needed here.
-		var v struct {
-			ID      json.Number `json:"id"`
-			ModelID json.Number `json:"modelId"`
-			Name    string      `json:"name"`
-		}
-		if err := json.Unmarshal([]byte(raw.String), &v); err != nil {
-			continue
-		}
-		modelID := v.ModelID.String()
+		modelID, versionID, versionName := decodeOwnedVersion(provider, raw.String)
 		if modelID == "" || modelID == "0" {
 			continue
 		}
 		mk := provider + "/" + modelID
 		idx.ownedVersions[mk] = append(idx.ownedVersions[mk], ownedVersion{
-			VersionID:   v.ID.String(),
-			VersionName: v.Name,
+			VersionID:   versionID,
+			VersionName: versionName,
 			SHA256:      strings.ToUpper(key),
 		})
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Newest version first, by numeric id. The rows arrive in whatever order
+	// SQLite emits them, and everything downstream that says "the version you
+	// have" reads element 0 -- without this the reported have-version (and the
+	// LocalPath shown for it) changes across runs for no visible reason.
+	for _, versions := range idx.ownedVersions {
+		sort.Slice(versions, func(i, j int) bool {
+			return numericID(versions[i].VersionID) > numericID(versions[j].VersionID)
+		})
+	}
+	return nil
+}
+
+// decodeOwnedVersion extracts (modelID, versionID, versionName) from an
+// archived response body.
+//
+// Civitai's by-hash body is a model version: {id, modelId, name}. CivArchive
+// mirrors the same records but may keep its own spellings and envelopes, so
+// its rows go through the same tolerant decode as its listings -- a
+// Civitai-only struct here silently dropped every civarchive row, making the
+// provider's half of the ownership index dead.
+func decodeOwnedVersion(provider, raw string) (modelID, versionID, versionName string) {
+	if provider == ProviderCivArchiveID {
+		records, _, err := decodeCivArchive(json.RawMessage(raw))
+		if err != nil || len(records) == 0 {
+			var one caRecord
+			if err := json.Unmarshal([]byte(raw), &one); err != nil {
+				return "", "", ""
+			}
+			records = []caRecord{one}
+		}
+		r := records[0]
+		// Same id semantics as caListing: top-level id is the model unless a
+		// modelId disambiguates, and version identity comes from the aliases.
+		return firstNonEmptyNum(r.ModelID, r.ModelIDAlt, r.ID),
+			firstNonEmptyNum(r.VersionIDAlt, r.VersionID),
+			r.VersionName
+	}
+
+	var v struct {
+		ID      json.Number `json:"id"`
+		ModelID json.Number `json:"modelId"`
+		Name    string      `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return "", "", ""
+	}
+	return v.ModelID.String(), v.ID.String(), v.Name
+}
+
+// numericID parses a version id for ordering; non-numeric ids sort last.
+func numericID(s string) int64 {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return -1
+	}
+	return n
 }
 
 // Annotate fills in Listing.Local for each item.
@@ -179,10 +230,19 @@ func (idx *LocalIndex) match(l Listing) *LocalMatch {
 					}
 				}
 			}
-			// A different version of a model we own.
+			// A different version of a model we own. Only a listing NEWER than
+			// the newest held is an update; Civitai returns every version of a
+			// model, and badging v1-v4 of an owned v5 as "update" invites the
+			// user to downgrade. Older (or unordered) versions report as new,
+			// with the held version attached so a UI can still say "you have
+			// v5" without calling it an upgrade.
 			newest := owned[0]
+			status := MatchNew
+			if numericID(l.VersionID) > numericID(newest.VersionID) && numericID(newest.VersionID) >= 0 {
+				status = MatchOutdated
+			}
 			return &LocalMatch{
-				Status:          MatchOutdated,
+				Status:          status,
 				SHA256:          newest.SHA256,
 				Path:            idx.bySHA[newest.SHA256],
 				HaveVersionID:   newest.VersionID,

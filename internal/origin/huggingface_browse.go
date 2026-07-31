@@ -94,7 +94,11 @@ func (p *HuggingFaceProvider) Search(ctx context.Context, q Query) (*Page, error
 	page := &Page{}
 	site := siteBase(c.huggingFaceBase())
 	for _, m := range models {
-		page.Items = append(page.Items, hfListing(m, site))
+		l := hfListing(m, site)
+		if !baseModelMatches(q.BaseModels, l.BaseModel) {
+			continue
+		}
+		page.Items = append(page.Items, l)
 	}
 	// HF pages by offset and does not report a total, so there is no way to
 	// know this is the last page other than a short read.
@@ -119,9 +123,12 @@ func hfSearchParams(q Query) url.Values {
 			v.Add("filter", tag)
 		}
 	}
-	for _, b := range q.BaseModels {
-		v.Add("filter", "base_model:"+b)
-	}
+	// Base-model filtering is deliberately NOT sent to HuggingFace. Its
+	// base_model tags are full repo names ("base_model:stabilityai/stable-
+	// diffusion-xl-base-1.0"), so a normalized "SDXL" matches nothing, and
+	// multiple filter params AND together where the caller means OR -- either
+	// way the result is a silent empty page. Results are filtered client-side
+	// after normalization instead; approximate, but honestly so.
 
 	switch q.Sort {
 	case SortDownloads:
@@ -147,6 +154,20 @@ func hfSearchParams(q Query) url.Values {
 	// second round trip per repo.
 	v.Set("full", "true")
 	return v
+}
+
+// baseModelMatches applies the base-model filter client-side; see the note in
+// hfSearchParams for why the server cannot do it.
+func baseModelMatches(want []string, have string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	for _, w := range want {
+		if strings.EqualFold(strings.TrimSpace(w), strings.TrimSpace(have)) {
+			return true
+		}
+	}
+	return false
 }
 
 func hfLimit(q Query) int {

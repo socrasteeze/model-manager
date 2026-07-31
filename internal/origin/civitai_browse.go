@@ -129,7 +129,14 @@ func civitaiSearchParams(q Query) url.Values {
 		}
 	}
 	for _, b := range q.BaseModels {
-		v.Add("baseModels", b)
+		// The query carries normalized names ("SDXL", "Flux") because that is
+		// what local facets show, but Civitai's filter wants its own labels
+		// ("SDXL 1.0", "Flux.1 D"). Expand each normalized name to the native
+		// spellings it covers; an unrecognized value passes through verbatim so
+		// a user typing Civitai's exact label still works.
+		for _, native := range civitaiBaseModels(b) {
+			v.Add("baseModels", native)
+		}
 	}
 	if sort := civitaiSort(q.Sort); sort != "" {
 		v.Set("sort", sort)
@@ -216,6 +223,33 @@ func civitaiTypeToLocal(t string) string {
 	}
 }
 
+// civitaiBaseModels expands a normalized base-model name to the native labels
+// Civitai's filter accepts. The inverse of normalizeCivitaiBase, and lossy the
+// same way: one normalized name covers several native ones, so the expansion
+// is a union. Approximate by design -- documented in docs/phase6.md.
+func civitaiBaseModels(normalized string) []string {
+	switch strings.ToLower(strings.TrimSpace(normalized)) {
+	case "sdxl":
+		return []string{"SDXL 1.0", "SDXL 0.9", "SDXL Turbo", "SDXL Lightning"}
+	case "pony":
+		return []string{"Pony"}
+	case "illustrious":
+		return []string{"Illustrious"}
+	case "noobai":
+		return []string{"NoobAI"}
+	case "flux":
+		return []string{"Flux.1 D", "Flux.1 S"}
+	case "sd 1.5", "sd1.5":
+		return []string{"SD 1.5"}
+	case "sd 2.x", "sd2":
+		return []string{"SD 2.0", "SD 2.1"}
+	case "sd 3", "sd3":
+		return []string{"SD 3", "SD 3.5", "SD 3.5 Medium", "SD 3.5 Large"}
+	default:
+		return []string{normalized}
+	}
+}
+
 func civitaiSort(s string) string {
 	switch s {
 	case SortDownloads:
@@ -265,11 +299,20 @@ func civitaiListings(m civitaiSearchModel) []Listing {
 		}
 		for _, f := range v.Files {
 			rf := RemoteFile{
-				Name:        f.Name,
-				SizeBytes:   int64(f.SizeKB * 1024),
-				Format:      firstNonEmpty(f.Metadata.Format, f.Type),
-				Primary:     f.Primary,
-				DownloadURL: firstNonEmpty(f.DownloadURL, v.DownloadURL),
+				Name:      f.Name,
+				SizeBytes: int64(f.SizeKB * 1024),
+				Format:    firstNonEmpty(f.Metadata.Format, f.Type),
+				Primary:   f.Primary,
+				// The version-level downloadUrl resolves to the PRIMARY file,
+				// so it is only a valid fallback for the primary. Inheriting
+				// it on a secondary file (a VAE, a config) would pair that
+				// file's hash with the primary's bytes -- a multi-GB download
+				// that can only fail verification, or worse, publish the
+				// wrong file under the right name.
+				DownloadURL: f.DownloadURL,
+			}
+			if rf.DownloadURL == "" && f.Primary {
+				rf.DownloadURL = v.DownloadURL
 			}
 			// Hash keys are upper-case in the API but not contractually so.
 			for k, hv := range f.Hashes {
@@ -285,10 +328,12 @@ func civitaiListings(m civitaiSearchModel) []Listing {
 	return out
 }
 
-// Files returns the listing's files, fetching the version if Search did not
-// include them.
+// Files returns the listing's files, fetching the version when Search did not
+// include them -- or included them without hashes, which some sort orders do.
+// Skipping the fetch in that case would make the "second fetch is the only way
+// to get them" purpose of this method unreachable exactly when it applies.
 func (p *CivitaiProvider) Files(ctx context.Context, l Listing) ([]RemoteFile, error) {
-	if len(l.Files) > 0 {
+	if len(l.Files) > 0 && hasHashIn(l.Files) {
 		return l.Files, nil
 	}
 	if l.VersionID == "" {
@@ -310,11 +355,15 @@ func (p *CivitaiProvider) Files(ctx context.Context, l Listing) ([]RemoteFile, e
 	var out []RemoteFile
 	for _, f := range v.Files {
 		rf := RemoteFile{
-			Name:        f.Name,
-			SizeBytes:   int64(f.SizeKB * 1024),
-			Format:      firstNonEmpty(f.Metadata.Format, f.Type),
-			Primary:     f.Primary,
-			DownloadURL: firstNonEmpty(f.DownloadURL, v.DownloadURL),
+			Name:      f.Name,
+			SizeBytes: int64(f.SizeKB * 1024),
+			Format:    firstNonEmpty(f.Metadata.Format, f.Type),
+			Primary:   f.Primary,
+			// Version-level downloadUrl is the primary file; see civitaiListings.
+			DownloadURL: f.DownloadURL,
+		}
+		if rf.DownloadURL == "" && f.Primary {
+			rf.DownloadURL = v.DownloadURL
 		}
 		for k, hv := range f.Hashes {
 			if strings.EqualFold(k, "SHA256") {

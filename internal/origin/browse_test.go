@@ -3,6 +3,7 @@ package origin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -315,3 +316,80 @@ func repeatHex64(c byte) string {
 	return string(b)
 }
 
+
+// An owned model's OLDER versions must not badge as updates: Civitai returns
+// every version, and calling v1 an "update" to an owned v5 invites a downgrade.
+func TestOutdatedOnlyForNewerVersions(t *testing.T) {
+	st := testStore(t)
+	const localSHA = "3333333333333333333333333333333333333333333333333333333333333333"
+	seed(t, st, localSHA, false)
+	cache := NewCache(st)
+	// The library holds version 500 of model 77.
+	if err := cache.PutFound(ProviderCivitaiID, localSHA,
+		json.RawMessage(`{"id":500,"modelId":77,"name":"v5"}`), 200); err != nil {
+		t.Fatal(err)
+	}
+
+	idx, err := BuildLocalIndex(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items := []Listing{
+		{Provider: ProviderCivitaiID, ID: "77", VersionID: "100", VersionName: "v1"}, // older
+		{Provider: ProviderCivitaiID, ID: "77", VersionID: "900", VersionName: "v9"}, // newer
+	}
+	idx.Annotate(items)
+
+	if got := items[0].Local.Status; got != MatchNew {
+		t.Errorf("older version = %q, want new (not an update)", got)
+	}
+	// The held version still rides along so a UI can say "you have v5".
+	if items[0].Local.HaveVersionID != "500" {
+		t.Errorf("older version lost the held-version context: %+v", items[0].Local)
+	}
+	if got := items[1].Local.Status; got != MatchOutdated {
+		t.Errorf("newer version = %q, want outdated", got)
+	}
+}
+
+// The ResolveFiles budget counts network spend. A provider that answers from
+// the listing's own files must not consume slots, or hashless-but-file-bearing
+// providers starve the one provider (HuggingFace) the second fetch exists for.
+func TestResolveFilesBudgetCountsNetworkSpend(t *testing.T) {
+	tree := `[{"type":"file","path":"m.safetensors","size":9,"oid":"x",
+              "lfs":{"oid":"` + repeatHex64('c') + `","size":9}}]`
+	var treeCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		treeCalls++
+		w.Write([]byte(tree))
+	}))
+	defer srv.Close()
+
+	c := testClient()
+	c.HuggingFaceBase = srv.URL
+	reg := NewRegistry(c)
+
+	// Ten CivArchive listings whose files exist but carry no hash (their
+	// Files() is a no-op), then one HuggingFace listing needing a real fetch.
+	var items []Listing
+	for i := 0; i < 10; i++ {
+		items = append(items, Listing{
+			Provider: ProviderCivArchiveID,
+			ID:       fmt.Sprintf("%d", i+1),
+			Files:    []RemoteFile{{Name: "gone.safetensors", DownloadURL: "https://x/dl"}},
+		})
+	}
+	items = append(items, Listing{Provider: ProviderHuggingFaceID, ID: "owner/repo"})
+
+	// Budget of 5 would previously be eaten by the first five no-ops.
+	reg.ResolveFiles(context.Background(), items, 5)
+
+	if treeCalls != 1 {
+		t.Fatalf("tree endpoint called %d times, want exactly 1", treeCalls)
+	}
+	hf := items[len(items)-1]
+	if len(hf.Files) == 0 || hf.Files[0].SHA256 != repeatHex64('C') {
+		t.Fatalf("huggingface listing never got its hash: %+v", hf.Files)
+	}
+}

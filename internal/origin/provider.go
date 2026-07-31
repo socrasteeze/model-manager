@@ -361,9 +361,17 @@ func (r *Registry) ResolveFiles(ctx context.Context, items []Listing, max int) {
 	if max <= 0 {
 		max = 25
 	}
-	done := 0
+	// The budget counts NETWORK SPEND, not loop iterations. A provider whose
+	// Files() returns the listing's own files unchanged has fetched nothing
+	// and must not consume a slot -- otherwise a page of hashless CivArchive
+	// listings exhausts the budget before the HuggingFace listings (the ones
+	// the second fetch exists for) are ever reached, and every one of them
+	// reports as "new" even when owned. Errors DO count: an erroring provider
+	// spent a request per try, and exempting it would turn the cap into
+	// unbounded retries.
+	spent := 0
 	for i := range items {
-		if done >= max || ctx.Err() != nil {
+		if spent >= max || ctx.Err() != nil {
 			return
 		}
 		if hasAnyHash(items[i]) {
@@ -373,13 +381,30 @@ func (r *Registry) ResolveFiles(ctx context.Context, items []Listing, max int) {
 		if !ok {
 			continue
 		}
+		before := len(items[i].Files)
 		files, err := p.Files(ctx, items[i])
-		if err != nil || len(files) == 0 {
+		if err != nil {
+			spent++
 			continue
 		}
+		if len(files) == 0 {
+			continue
+		}
+		changed := len(files) != before || hasHashIn(files)
 		items[i].Files = files
-		done++
+		if changed {
+			spent++
+		}
 	}
+}
+
+func hasHashIn(files []RemoteFile) bool {
+	for _, f := range files {
+		if f.SHA256 != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasAnyHash(l Listing) bool {

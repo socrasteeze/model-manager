@@ -319,7 +319,13 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 // Separate from fetching on purpose: this runs over the stored blob, so
 // improving the extraction never costs another API call, and the 19k-lookup
 // budget is spent exactly once (§12.1).
-func ObservationsFromCivitai(raw json.RawMessage) ([]store.FieldObservation, []string, map[string]string, []string) {
+//
+// localSHA is the hash the lookup was keyed by. It selects which file's hash
+// set is returned: a version often ships several files (full precision, fp16,
+// VAE), and recording the primary file's AutoV2/BLAKE3 under a non-primary
+// file's sha256 would make origin_hash confidently wrong -- the exact error
+// class the table exists to prevent. Pass "" to fall back to the primary.
+func ObservationsFromCivitai(raw json.RawMessage, localSHA string) ([]store.FieldObservation, []string, map[string]string, []string) {
 	var v CivitaiVersion
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return nil, nil, nil, nil
@@ -350,14 +356,39 @@ func ObservationsFromCivitai(raw json.RawMessage) ([]store.FieldObservation, []s
 		add(provenance.FieldNSFW, *v.Model.NSFW)
 	}
 
-	// Hashes come from the primary file, or the only one if none is flagged.
+	// Hashes come from the file that IS the local file -- matched by the
+	// sha256 the lookup was keyed by -- never merely from the primary. Falls
+	// back to the primary (or only) file when no file's hash set matches,
+	// which covers responses that omit per-file hashes entirely.
 	hashes := map[string]string{}
-	for _, f := range v.Files {
-		if f.Primary || len(v.Files) == 1 {
-			for k, val := range f.Hashes {
-				hashes[k] = val
+	matched := false
+	if localSHA != "" {
+		for _, f := range v.Files {
+			if strings.EqualFold(f.Hashes["SHA256"], localSHA) {
+				for k, val := range f.Hashes {
+					hashes[k] = val
+				}
+				matched = true
+				break
 			}
-			break
+		}
+	}
+	if !matched {
+		for _, f := range v.Files {
+			if f.Primary || len(v.Files) == 1 {
+				// Only trust the fallback when it cannot mislabel: if the
+				// caller named a local sha and this file's differs, recording
+				// its hashes under localSHA would be the exact mix-up this
+				// selection exists to stop.
+				if localSHA != "" && f.Hashes["SHA256"] != "" &&
+					!strings.EqualFold(f.Hashes["SHA256"], localSHA) {
+					break
+				}
+				for k, val := range f.Hashes {
+					hashes[k] = val
+				}
+				break
+			}
 		}
 	}
 

@@ -83,16 +83,23 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		registry.ResolveFiles(ctx, items, limit)
 	}
 
-	if idx, err := origin.BuildLocalIndex(s.cfg.Store); err == nil {
-		idx.Annotate(items)
-	}
-
 	resp := browseResponse{Items: items, Providers: registry.IDs()}
 	if len(errs) > 0 {
 		resp.Errors = map[string]string{}
 		for id, err := range errs {
 			resp.Errors[id] = err.Error()
 		}
+	}
+	// An annotation failure must be visible, not silent: without the local
+	// index every result renders as unowned, which is a wrong answer that
+	// invites re-downloading the library.
+	if idx, err := origin.BuildLocalIndex(s.cfg.Store); err == nil {
+		idx.Annotate(items)
+	} else {
+		if resp.Errors == nil {
+			resp.Errors = map[string]string{}
+		}
+		resp.Errors["local"] = "could not read the library index; have/update status is missing: " + err.Error()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -101,6 +108,9 @@ type updatesResponse struct {
 	Updates []origin.Update `json:"updates"`
 	Checked int             `json:"checked"`
 	Errors  int             `json:"errors"`
+
+	// RateLimited marks a partial sweep; see origin.UpdateStats.
+	RateLimited bool `json:"rate_limited,omitempty"`
 }
 
 func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
@@ -151,9 +161,10 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, updatesResponse{
-		Updates: updates,
-		Checked: stats.Checked,
-		Errors:  stats.Errors,
+		Updates:     updates,
+		Checked:     stats.Checked,
+		Errors:      stats.Errors,
+		RateLimited: stats.RateLimited,
 	})
 }
 

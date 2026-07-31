@@ -101,7 +101,7 @@ func Enrich(ctx context.Context, st *store.Store, opts EnrichOptions) (*EnrichSt
 		}
 		stats.Found++
 
-		obs, tags, hashes, images := ObservationsFromCivitai(raw)
+		obs, tags, hashes, images := ObservationsFromCivitai(raw, sha)
 		if len(obs) > 0 {
 			if err := st.RecordObservations(sha, provenance.SourceCivitai, obs); err != nil {
 				stats.Errors++
