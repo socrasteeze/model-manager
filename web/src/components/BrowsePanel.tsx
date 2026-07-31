@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   browse,
+  cancelDownload,
   checkUpdates,
   config,
   downloadRoots,
   emptyBrowseQuery,
   formatBytes,
+  isJobActive,
+  isJobTerminalFailure,
   listDownloads,
   remoteImageURL,
   startDownload,
@@ -26,7 +29,7 @@ const PROVIDERS = [
 
 const TYPES = ['lora', 'checkpoint', 'lycoris', 'embedding', 'controlnet', 'vae']
 
-export function BrowsePanel() {
+export function BrowsePanel({ hidden }: { hidden?: boolean }) {
   const [query, setQuery] = useState<BrowseQuery>(emptyBrowseQuery)
   const [draft, setDraft] = useState('')
   const [results, setResults] = useState<BrowseResults | null>(null)
@@ -53,7 +56,7 @@ export function BrowsePanel() {
 
   // Poll only while something is in flight. A finished queue must not keep the
   // daemon busy answering for a tab nobody is looking at.
-  const active = jobs.some((j) => j.state === 'pending' || j.state === 'downloading' || j.state === 'verifying')
+  const active = jobs.some(isJobActive)
   useEffect(() => {
     if (!canDownload) return
     const tick = () => listDownloads().then(setJobs).catch(() => {})
@@ -62,6 +65,8 @@ export function BrowsePanel() {
     const timer = setInterval(tick, 1000)
     return () => clearInterval(timer)
   }, [canDownload, active])
+
+  const [jobIdByUrl, setJobIdByUrl] = useState<Record<string, string>>({})
 
   const run = useCallback((q: BrowseQuery) => {
     setLoading(true)
@@ -73,25 +78,42 @@ export function BrowsePanel() {
   }, [])
 
   useEffect(() => {
+    // An untouched query is not a search: auto-firing an empty three-provider
+    // sweep on mount costs real requests against rate-limited public APIs for
+    // a tab the user may only be glancing at. Anything beyond the defaults --
+    // text, a filter, a page, a sort change -- runs normally.
+    if (
+      query.q === '' &&
+      query.providers.length === 0 &&
+      query.type.length === 0 &&
+      query.base_model.length === 0 &&
+      !query.nsfw &&
+      query.page === 1 &&
+      query.sort === emptyBrowseQuery.sort
+    ) {
+      setResults(null)
+      return
+    }
     run(query)
   }, [query, run])
 
+  // Functional updates: two quick clicks in one React batch must not build
+  // the second state from the first's stale snapshot.
   const toggle = (key: 'providers' | 'type', value: string) => {
-    const current = query[key]
-    setQuery({
-      ...query,
-      [key]: current.includes(value) ? current.filter((v) => v !== value) : [...current, value],
+    setQuery((q) => ({
+      ...q,
+      [key]: q[key].includes(value) ? q[key].filter((v) => v !== value) : [...q[key], value],
       page: 1,
-    })
+    }))
   }
 
   return (
-    <div className="browse">
+    <div className="browse" hidden={hidden}>
       <form
         className="browse-search"
         onSubmit={(e) => {
           e.preventDefault()
-          setQuery({ ...query, q: draft, page: 1 })
+          setQuery((q) => ({ ...q, q: draft, page: 1 }))
         }}
       >
         <input
@@ -131,7 +153,7 @@ export function BrowsePanel() {
         <div className="chip-row">
           <select
             value={query.sort}
-            onChange={(e) => setQuery({ ...query, sort: e.target.value, page: 1 })}
+            onChange={(e) => setQuery((q) => ({ ...q, sort: e.target.value, page: 1 }))}
             aria-label="Sort order"
           >
             <option value="downloads">Most downloaded</option>
@@ -144,7 +166,7 @@ export function BrowsePanel() {
             <input
               type="checkbox"
               checked={query.nsfw}
-              onChange={(e) => setQuery({ ...query, nsfw: e.target.checked, page: 1 })}
+              onChange={(e) => setQuery((q) => ({ ...q, nsfw: e.target.checked, page: 1 }))}
             />
             <span>Include adult content</span>
           </label>
@@ -206,8 +228,11 @@ export function BrowsePanel() {
             listing={l}
             destRoot={destRoot}
             canDownload={canDownload}
-            job={jobFor(jobs, l)}
-            onStarted={() => listDownloads().then(setJobs).catch(() => {})}
+            job={jobFor(jobs, l, jobIdByUrl)}
+            onStarted={(id, url) => {
+              if (id && url) setJobIdByUrl((m) => ({ ...m, [url]: id }))
+              listDownloads().then(setJobs).catch(() => {})
+            }}
           />
         ))}
       </div>
@@ -216,16 +241,16 @@ export function BrowsePanel() {
         <p className="source-note">No results.</p>
       )}
 
-      {results && results.items.length > 0 && (
+      {results && (results.items.length > 0 || query.page > 1) && (
         <div className="browse-paging">
           <button
             disabled={query.page <= 1 || loading}
-            onClick={() => setQuery({ ...query, page: query.page - 1 })}
+            onClick={() => setQuery((q) => ({ ...q, page: q.page - 1 }))}
           >
             Previous
           </button>
           <span>Page {query.page}</span>
-          <button disabled={loading} onClick={() => setQuery({ ...query, page: query.page + 1 })}>
+          <button disabled={loading} onClick={() => setQuery((q) => ({ ...q, page: q.page + 1 }))}>
             Next
           </button>
         </div>
@@ -245,12 +270,34 @@ function ListingCard({
   destRoot: string
   canDownload: boolean
   job?: DownloadJob
-  onStarted: () => void
+  onStarted: (id?: string, url?: string) => void
 }) {
   const status = listing.local?.status ?? 'new'
   const file = pickFile(listing.files)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+
+  // Shared by the Download and Retry buttons: same request, different label.
+  const start = async () => {
+    if (!file?.download_url) return
+    setBusy(true)
+    setErr(null)
+    try {
+      const res = await startDownload({
+        url: file.download_url,
+        dest_root: destRoot,
+        subdir: listing.type ? `${listing.type}s` : undefined,
+        filename: file.name,
+        sha256: file.sha256,
+        size: file.size_bytes,
+      })
+      onStarted(res.id, file.download_url)
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
     <article className={`listing ${status}`}>
@@ -300,32 +347,34 @@ function ListingCard({
 
         <div className="listing-actions">
           {file?.download_url && status !== 'have' && canDownload && !job && (
+            <button className="primary" disabled={busy} onClick={start}>
+              {busy ? 'Starting…' : 'Download'}
+            </button>
+          )}
+          {/* A failed, quarantined or cancelled job is not the end of the
+              story: the server allows a terminal ID to start again (with a
+              quarantined partial already moved aside), so the UI must offer
+              the retry rather than hiding the button forever. */}
+          {job && isJobTerminalFailure(job) && canDownload && (
+            <button className="primary" disabled={busy} onClick={start}>
+              {busy ? 'Starting…' : 'Retry'}
+            </button>
+          )}
+          {job && isJobActive(job) && (
             <button
-              className="primary"
+              className="ghost"
               disabled={busy}
               onClick={async () => {
                 setBusy(true)
-                setErr(null)
                 try {
-                  await startDownload({
-                    url: file.download_url!,
-                    dest_root: destRoot,
-                    // Group by type so a download lands where the tool that
-                    // reads this root already expects to find it.
-                    subdir: listing.type ? `${listing.type}s` : undefined,
-                    filename: file.name,
-                    sha256: file.sha256,
-                    size: file.size_bytes,
-                  })
+                  await cancelDownload(job.id)
                   onStarted()
-                } catch (e) {
-                  setErr((e as Error).message)
                 } finally {
                   setBusy(false)
                 }
               }}
             >
-              {busy ? 'Starting…' : 'Download'}
+              Cancel
             </button>
           )}
           {file?.download_url && status !== 'have' && (
@@ -402,18 +451,44 @@ function UpdateList({ updates, onClose }: { updates: Update[]; onClose: () => vo
   )
 }
 
-// jobFor matches a listing to an in-flight download by URL, which is the only
-// identifier the two sides share.
-function jobFor(jobs: DownloadJob[], listing: Listing): DownloadJob | undefined {
-  const urls = new Set((listing.files ?? []).map((f) => f.download_url).filter(Boolean))
-  return jobs.find((j) => urls.has(j.url))
+// jobFor resolves a listing's download job: by the ID the server returned at
+// start when we have it, else by URL for jobs started elsewhere (another tab,
+// the CLI). URL matching alone was fragile -- the server stores the re-encoded
+// URL, and any mismatch resurrected the Download button mid-transfer.
+function jobFor(
+  jobs: DownloadJob[],
+  listing: Listing,
+  idByUrl: Record<string, string>,
+): DownloadJob | undefined {
+  const urls = (listing.files ?? []).map((f) => f.download_url).filter(Boolean) as string[]
+  for (const u of urls) {
+    const id = idByUrl[u]
+    if (id) {
+      const byID = jobs.find((j) => j.id === id)
+      if (byID) return byID
+    }
+  }
+  const set = new Set(urls)
+  return jobs.find((j) => set.has(j.url))
 }
 
 function JobProgress({ job }: { job: DownloadJob }) {
   const pct = job.total > 0 ? Math.min(100, (job.downloaded / job.total) * 100) : 0
 
   if (job.state === 'complete') {
-    return <p className="source-note">Downloaded to {job.final_path}</p>
+    return (
+      <div>
+        <p className="source-note">Downloaded to {job.final_path}</p>
+        {job.index_error && (
+          <p className="warn-note">
+            Downloaded but not indexed yet — it will appear after the next scan. ({job.index_error})
+          </p>
+        )}
+      </div>
+    )
+  }
+  if (job.state === 'cancelled') {
+    return <p className="source-note">Cancelled — partial kept; Retry resumes where it stopped.</p>
   }
   if (job.state === 'failed' || job.state === 'quarantined') {
     // Quarantined means the bytes arrived but the hash did not match, so the
@@ -441,14 +516,14 @@ function JobProgress({ job }: { job: DownloadJob }) {
 
 function DownloadQueue({ jobs }: { jobs: DownloadJob[] }) {
   const done = jobs.filter((j) => j.state === 'complete').length
-  const failed = jobs.filter((j) => j.state === 'failed' || j.state === 'quarantined').length
-  const running = jobs.length - done - failed
+  const failed = jobs.filter((j) => isJobTerminalFailure(j)).length
+  const running = jobs.filter(isJobActive).length
   return (
     <span className="source-note">
       {running > 0 && `${running} downloading`}
       {running > 0 && (done > 0 || failed > 0) && ' · '}
       {done > 0 && `${done} done`}
-      {failed > 0 && ` · ${failed} failed`}
+      {failed > 0 && ` · ${failed} failed/stopped`}
     </span>
   )
 }

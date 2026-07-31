@@ -447,7 +447,7 @@ input:focus, select:focus, textarea:focus {
 .tabs button {
   background: none;
   border: none;
-  color: var(--muted);
+  color: var(--text-dim);
   padding: 0.45rem 0.8rem;
   border-radius: 6px;
   cursor: pointer;
@@ -455,13 +455,20 @@ input:focus, select:focus, textarea:focus {
 }
 
 .tabs button.on {
-  color: var(--fg);
-  background: var(--surface-2);
+  color: var(--text);
+  background: var(--bg-sunken);
 }
 
 .browse {
+  /* Mirror .body: as a column flex item it must be allowed to shrink below
+     its content (min-height: 0) or overflow-y never engages and the whole
+     document scrolls, taking the topbar with it. */
+  flex: 1;
+  min-height: 0;
   padding: 1rem 1.25rem 3rem;
   overflow-y: auto;
+  max-width: var(--shell-max);
+  width: 100%;
 }
 
 .browse-search {
@@ -488,18 +495,21 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
 }
 
-.chip {
-  background: var(--surface-2);
+/* Scoped under .chip-row: the library grid has its own .chip (a static type
+   label), and an unscoped rule here would win by source order and restyle it
+   with a pointer cursor it does not deserve. */
+.chip-row .chip {
+  background: var(--bg-sunken);
   border: 1px solid transparent;
-  color: var(--muted);
+  color: var(--text-dim);
   border-radius: 999px;
   padding: 0.25rem 0.7rem;
   cursor: pointer;
   font-size: 0.85rem;
 }
 
-.chip.on {
-  color: var(--fg);
+.chip-row .chip.on {
+  color: var(--text);
   border-color: var(--accent);
 }
 
@@ -516,7 +526,7 @@ input:focus, select:focus, textarea:focus {
 .listing {
   display: flex;
   gap: 0.75rem;
-  background: var(--surface);
+  background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 0.75rem;
@@ -562,13 +572,13 @@ input:focus, select:focus, textarea:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
-  color: var(--muted);
+  color: var(--text-dim);
   font-size: 0.8rem;
   margin-bottom: 0.4rem;
 }
 
 .provider-badge {
-  color: var(--fg);
+  color: var(--text);
 }
 
 .nsfw-badge {
@@ -576,8 +586,8 @@ input:focus, select:focus, textarea:focus {
 }
 
 .have-badge {
-  background: var(--surface-2);
-  color: var(--muted);
+  background: var(--bg-sunken);
+  color: var(--text-dim);
 }
 
 .update-badge {
@@ -587,7 +597,7 @@ input:focus, select:focus, textarea:focus {
 
 .new-badge {
   background: transparent;
-  color: var(--muted);
+  color: var(--text-dim);
   border: 1px solid var(--border);
 }
 
@@ -603,7 +613,7 @@ input:focus, select:focus, textarea:focus {
 a.ghost {
   background: none;
   border: 1px solid var(--border);
-  color: var(--muted);
+  color: var(--text-dim);
   border-radius: 6px;
   padding: 0.25rem 0.6rem;
   font-size: 0.82rem;
@@ -623,11 +633,11 @@ a.ghost {
   align-items: center;
   justify-content: center;
   margin-top: 1.5rem;
-  color: var(--muted);
+  color: var(--text-dim);
 }
 
 .updates {
-  background: var(--surface);
+  background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 0.85rem;
@@ -677,7 +687,7 @@ a.ghost {
   gap: 0.75rem;
   flex-wrap: wrap;
   margin-bottom: 0.9rem;
-  color: var(--muted);
+  color: var(--text-dim);
   font-size: 0.85rem;
 }
 
@@ -712,7 +722,7 @@ a.ghost {
 .progress-bar {
   flex: 1;
   height: 6px;
-  background: var(--surface-2);
+  background: var(--bg-sunken);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -725,7 +735,7 @@ a.ghost {
 }
 
 .progress-label {
-  color: var(--muted);
+  color: var(--text-dim);
   font-size: 0.75rem;
   white-space: nowrap;
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   acceptSuggestion,
   config,
@@ -47,9 +47,18 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
 
   // Escape closes the panel. On a phone this is the back gesture's job, but on a
   // desktop it is the thing everyone reaches for first.
+  //
+  // Gated on actual visibility: the panel stays mounted while the Browse tab
+  // is shown (the library is hidden, not unmounted), and a global listener
+  // firing there would silently clear the library's selection from a key
+  // pressed on a different screen.
+  const rootRef = useRef<HTMLElement>(null)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Escape') return
+      const el = rootRef.current
+      if (!el || el.closest('[hidden]')) return
+      onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -71,7 +80,7 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
 
   if (error && !detail) {
     return (
-      <aside className="detail">
+      <aside className="detail" ref={rootRef}>
         <button className="close" onClick={onClose} aria-label="Close">×</button>
         <div className="error">{error}</div>
       </aside>
@@ -80,7 +89,7 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
 
   if (!detail) {
     return (
-      <aside className="detail">
+      <aside className="detail" ref={rootRef}>
         <button className="close" onClick={onClose} aria-label="Close">×</button>
         <div className="loading">Loading…</div>
       </aside>
@@ -92,7 +101,7 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
   const title = rec?.name || detail.paths[0]?.Path.split(/[/\\]/).pop() || sha.slice(0, 12)
 
   return (
-    <aside className="detail">
+    <aside className="detail" ref={rootRef}>
       <button className="close" onClick={onClose} aria-label="Close">×</button>
 
       {detail.previews.length > 0 && (

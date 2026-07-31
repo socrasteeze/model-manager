@@ -148,7 +148,11 @@ export function App() {
         </div>
       )}
 
-      {tab === 'browse' && <BrowsePanel />}
+      {/* Kept mounted, like the library below: unmounting on tab switch would
+          replay the mount effects (and their provider requests) on every
+          Library-Browse round trip, and lose results, destination choice and
+          the visible download queue mid-transfer. */}
+      <BrowsePanel hidden={tab !== 'browse'} />
 
       <div className="body" hidden={tab !== 'library'}>
         <aside className={`sidebar${filtersOpen ? ' open' : ''}`}>

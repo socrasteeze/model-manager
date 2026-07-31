@@ -178,7 +178,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const body = await res.json()
       detail = body.detail || body.error || detail
     } catch {
-      /* not JSON; the status text will have to do */
+      // Not JSON. The security middleware writes plain text with the exact
+      // fix in it ("add the hostname with --allow-host..."); showing a bare
+      // "Forbidden" instead of that message defeats its purpose.
+      try {
+        const text = await res.clone().text()
+        if (text.trim()) detail = text.trim()
+      } catch {
+        /* the status text will have to do */
+      }
     }
     throw new Error(detail)
   }
@@ -307,15 +315,28 @@ export interface DownloadJob {
   id: string
   url: string
   dest_dir: string
+  dest_root?: string
   filename: string
   expected_sha256?: string
+  expected_size?: number
   state: 'pending' | 'downloading' | 'verifying' | 'complete' | 'failed' | 'quarantined' | 'cancelled'
   downloaded: number
   total: number
   error?: string
   actual_sha256?: string
   final_path?: string
+  quarantine_path?: string
+  // Set when the file downloaded and verified but could not be indexed: it
+  // exists on disk, the library just does not show it yet.
+  index_error?: string
+  started_at: string
 }
+
+export const isJobActive = (j: DownloadJob) =>
+  j.state === 'pending' || j.state === 'downloading' || j.state === 'verifying'
+
+export const isJobTerminalFailure = (j: DownloadJob) =>
+  j.state === 'failed' || j.state === 'quarantined' || j.state === 'cancelled'
 
 export interface StartDownload {
   url: string
@@ -329,11 +350,23 @@ export interface StartDownload {
 export const downloadRoots = () => request<string[]>('/api/downloads/roots')
 export const listDownloads = () => request<DownloadJob[]>('/api/downloads')
 
-export const startDownload = (req: StartDownload) =>
-  request<{ status: string; dest_dir: string }>('/api/downloads', {
+// A 409 means the download is already running -- benign from the user's
+// point of view -- and the response still carries the job id, so it is
+// resolved rather than thrown.
+export async function startDownload(req: StartDownload): Promise<{ status: string; id: string }> {
+  const res = await fetch('/api/downloads', {
     method: 'POST',
+    headers: headers(),
     body: JSON.stringify(req),
   })
+  const body = await res.json().catch(() => ({}))
+  if (res.status === 409 && body.id) return { status: 'in_progress', id: body.id }
+  if (!res.ok) throw new Error(body.detail || body.error || res.statusText)
+  return body
+}
+
+export const cancelDownload = (id: string) =>
+  request<{ status: string }>(`/api/downloads/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
 export interface Update {
   provider: string
