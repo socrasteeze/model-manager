@@ -77,10 +77,16 @@ mm serve --writable                          # ...and download from the Browse t
 ```
 
 On Windows, `start.bat` does the last step for you: it finds `mm.exe` (or builds
-it if Go is installed), starts the daemon, and opens the browser once the port is
-actually listening. It runs writable so downloads work — `start.bat readonly` or
-`start.bat offline` if you would rather it not write or not reach the network.
-Port, database path and API keys are settings at the top of the file.
+it if Go is installed), starts the daemon, and opens the UI once the port is
+actually listening — in an Edge/Chrome **app window**, so it presents as a
+desktop application rather than a browser tab. It runs writable so downloads
+work. Arguments: `browser` for an ordinary tab, `readonly` to forbid writes,
+`offline` to make no outbound requests. Port, database path and API keys are
+settings at the top of the file.
+
+The window is only a display: the same daemon simultaneously serves your phone
+and any other machine on your tailnet, which is why the UI is a local web server
+rather than a native GUI. See [native-vs-browser](docs/native-vs-browser.md).
 
 Then, once the index is proven:
 
