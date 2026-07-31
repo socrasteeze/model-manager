@@ -111,20 +111,28 @@ accounts; here the operator is the account holder, so there is nothing to
 delegate. A distributed binary also cannot hold a confidential client secret, and
 a browser round trip would break `mm enrich` running headless over SSH.
 
-**Credentials are scoped by host.** One client now talks to three unrelated third
+**Credentials are scoped by host.** One client talks to three unrelated third
 parties, and a single `Authorization` header applied to every request would hand
-the Civitai key to HuggingFace on the first cross-provider search. `tokenFor`
+the Civitai key to HuggingFace on the first cross-provider search. `TokenFor`
 selects per host with exact matching, so a lookalike domain cannot claim a token
-that is not its own.
+that is not its own. Downloads use the same selection — the transfer path had
+its own single key field and did leak, which is fixed.
+
+**With a token set, the UI also gets a cookie.** Opening `/?token=<token>`
+mints an `HttpOnly; SameSite=Strict` cookie, because the page's own script and
+stylesheet requests are issued by the browser and carry no header or query
+parameter — without it the UI is a blank page in exactly the off-loopback
+deployment the token exists for.
 
 ## HTTP API
 
-    GET  /api/browse?q=&provider=&type=&base_model=&sort=&page=&nsfw=
-    GET  /api/updates
-    GET  /api/remote-image?url=
-    POST /api/downloads
-    GET  /api/downloads
-    GET  /api/downloads/roots
+    GET    /api/browse?q=&provider=&type=&base_model=&sort=&page=&nsfw=
+    GET    /api/updates
+    GET    /api/remote-image?url=
+    POST   /api/downloads          -> 202 {status,id,dest_dir} | 409 {id} if running
+    GET    /api/downloads
+    DELETE /api/downloads/{id}     -> cancels in flight, forgets when terminal
+    GET    /api/downloads/roots
 
 These are the only endpoints that make outbound requests. `mm serve --no-remote`
 disables all three, which is how an operator keeps the daemon from talking to
@@ -183,7 +191,33 @@ uses (`scan.IndexFile`), so it appears in the library without a manual rescan
 and browse flips it from `new` to `have`. Sharing that code path matters: a
 separate implementation would give the file a subtly different identity — a
 different weights hash, or a path row missing the `(device, inode)` key that
-makes re-scans cheap — and it would surface later as a phantom duplicate.
+makes re-scans cheap — and it would surface later as a phantom duplicate. The
+root recorded is the canonical one the allowlist matched, never the caller's
+spelling of it, and an indexing failure lands on the job as `index_error`
+rather than disappearing.
+
+### Job lifecycle
+
+    pending -> downloading -> verifying -> complete
+                   |              |-> quarantined   (hash/size mismatch)
+                   |-> failed                        (partial kept, resumable)
+                   |-> cancelled                     (partial kept, resumable)
+
+A job's ID is a hash of URL and filename, which is what lets a retry resume the
+same partial file. Starting an ID that is already in flight is refused with 409
+and the running job's ID: two transfers appending to one partial interleave
+their streams into byte garbage, which is silent, multi-gigabyte, and lands in
+a model root. Once terminal, the same ID may be started again — that is the
+Retry button.
+
+Quarantine moves the rejected bytes to `<id>.quarantine` rather than leaving
+them on the resume path. Keeping them there meant every future attempt at that
+URL resumed from poisoned bytes and failed forever, with no way to clear it
+from the UI. The bytes are still kept; they just no longer poison the retry.
+
+When no expected hash is available the promised size is checked instead. It is
+weaker than a hash but catches the common failure: an HTML login page served
+with a 200, published under a `.safetensors` name.
 
 ## What listings are not
 
@@ -207,6 +241,11 @@ Owned results deliberately do not get a download command.
 ## Known gaps
 
 - Redirect targets during a transfer are not host-checked (see above).
+- Base-model filters are approximate. Civitai wants its own labels, so a
+  normalized name expands to the set it covers; HuggingFace tags are full repo
+  names, so its filtering happens client-side after normalization.
+- `mm updates --limit N` always checks the same first N models; there is no
+  resume cursor yet.
 - Update checking covers Civitai only. HuggingFace repos have no version
   identity, so "newer" would have to mean `lastModified` moving, which is a
   weaker claim than a version id changing.
