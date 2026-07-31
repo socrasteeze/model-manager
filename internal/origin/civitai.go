@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/provenance"
@@ -61,6 +62,12 @@ type Client struct {
 
 	UserAgent string
 
+	// mu serializes throttling. One Client is shared by every concurrent HTTP
+	// handler in the daemon; without this, N handlers all read the same
+	// lastRequest, all sleep the same interval, and all fire at once — the
+	// throttle exists precisely for that case and would otherwise only work
+	// when it isn't needed.
+	mu          sync.Mutex
 	lastRequest time.Time
 }
 
@@ -183,7 +190,7 @@ func (c *Client) getJSON(ctx context.Context, url string) (json.RawMessage, int,
 		req.Header.Set("Accept", "application/json")
 		req.Header.Set("User-Agent", c.UserAgent)
 		// Scoped by host: see auth.go. Never send one provider's key to another.
-		if token := c.tokenFor(url); token != "" {
+		if token := c.TokenFor(url); token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 
@@ -245,6 +252,13 @@ func (c *Client) throttle(ctx context.Context) error {
 	if c.MinInterval <= 0 {
 		return nil
 	}
+	// The lock is held across the sleep on purpose: releasing it there would
+	// let every waiter observe the same lastRequest, sleep in parallel, and
+	// stampede the API together. Holding it makes concurrent callers queue,
+	// which is the throttle's entire job. Cancellation still works — sleepCtx
+	// watches the context — so a cancelled request just gives up its turn.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	elapsed := time.Since(c.lastRequest)
 	if elapsed < c.MinInterval {
 		if err := sleepCtx(ctx, c.MinInterval-elapsed); err != nil {

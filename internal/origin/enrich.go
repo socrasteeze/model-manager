@@ -241,7 +241,7 @@ func (c *Client) fetchBytes(ctx context.Context, url string) ([]byte, error) {
 	if err := c.throttle(ctx); err != nil {
 		return nil, err
 	}
-	req, err := newRequest(ctx, url, c.UserAgent, c.tokenFor(url))
+	req, err := newRequest(ctx, url, c.UserAgent, c.TokenFor(url))
 	if err != nil {
 		return nil, err
 	}

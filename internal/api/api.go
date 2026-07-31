@@ -13,11 +13,13 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/download"
 	"github.com/socrasteeze/model-manager/internal/origin"
+	"github.com/socrasteeze/model-manager/internal/scan"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
 
@@ -57,10 +59,28 @@ type Server struct {
 	mux     *http.ServeMux
 	handler http.Handler
 	started time.Time
+
+	// updateCheck is the single-flight latch for /api/updates; see
+	// handleUpdates for why concurrency there is capped at one.
+	updateCheck atomic.Bool
 }
 
 // New builds a Server.
 func New(cfg Config) *Server {
+	// A finished download is indexed through the same tier-3 path a scan
+	// uses, so it appears in the library without a manual rescan and browse
+	// flips it from new to have. Wired here rather than inside the download
+	// package so download never imports the store. The root recorded is the
+	// job's canonical DestRoot, and a failure lands on the job as IndexError
+	// instead of vanishing.
+	if cfg.Downloads != nil && cfg.Store != nil {
+		cfg.Downloads.OnComplete = func(j download.Job) string {
+			if _, err := scan.IndexFile(cfg.Store, j.FinalPath, j.DestRoot); err != nil {
+				return err.Error()
+			}
+			return ""
+		}
+	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now()}
 	s.routes()
 	s.handler = cfg.Security.middleware(s.mux)
@@ -94,6 +114,7 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("POST /api/downloads", s.handleCreateDownload)
 	s.mux.HandleFunc("GET /api/downloads", s.handleListDownloads)
+	s.mux.HandleFunc("DELETE /api/downloads/{id}", s.handleCancelDownload)
 	s.mux.HandleFunc("GET /api/downloads/roots", s.handleDownloadRoots)
 
 	s.mux.HandleFunc("GET /api/facets", s.handleFacets)

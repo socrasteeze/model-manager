@@ -17,8 +17,13 @@ import (
 	"strings"
 )
 
-// tokenFor returns the bearer credential to send to rawURL, or "" for none.
-func (c *Client) tokenFor(rawURL string) string {
+// TokenFor returns the bearer credential to send to rawURL, or "" for none.
+//
+// Exported because the download manager needs the same host-scoped selection
+// for transfers: a Manager that applied one key to every request would hand
+// the Civitai credential to huggingface.co on the first cross-provider
+// download, which is the exact leak this function exists to prevent.
+func (c *Client) TokenFor(rawURL string) string {
 	host := hostOf(rawURL)
 	if host == "" {
 		return ""

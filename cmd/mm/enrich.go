@@ -129,7 +129,15 @@ Nothing is ever overwritten.`)
 	if err != nil {
 		return err
 	}
-	mgr.APIKey = *apiKey
+	// Host-scoped credentials, not one key for every request: a Civitai key
+	// sent to huggingface.co is a leaked credential. Building an origin client
+	// also picks up HF_TOKEN from the environment, so mm get can fetch gated
+	// HuggingFace repos — something a single-key design could never do right.
+	tokens := origin.NewClient()
+	if *apiKey != "" {
+		tokens.APIKey = *apiKey
+	}
+	mgr.TokenFor = tokens.TokenFor
 
 	var failed int
 	for _, url := range urls {

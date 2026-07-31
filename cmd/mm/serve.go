@@ -110,7 +110,10 @@ disk should not be reachable from a shared LAN without one.`)
 		if err != nil {
 			return fmt.Errorf("serve: preparing downloads: %w", err)
 		}
-		mgr.APIKey = os.Getenv("CIVITAI_API_KEY")
+		// Depends on originClient existing, which holds: both are gated on
+		// !*noRemote. Credentials are selected per host so the Civitai key is
+		// never presented to HuggingFace or anywhere else.
+		mgr.TokenFor = originClient.TokenFor
 		downloads = mgr
 	}
 

@@ -23,7 +23,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,7 +33,6 @@ import (
 	"strings"
 
 	"github.com/socrasteeze/model-manager/internal/download"
-	"github.com/socrasteeze/model-manager/internal/scan"
 )
 
 // downloadRequest is the body of POST /api/downloads.
@@ -80,39 +81,74 @@ func (s *Server) handleCreateDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	destDir, err := s.resolveDestination(req.DestRoot, req.Subdir)
+	destDir, matchedRoot, err := s.resolveDestination(req.DestRoot, req.Subdir)
 	if err != nil {
 		writeError(w, http.StatusForbidden, "invalid destination", err.Error())
 		return
 	}
 
 	job := download.Job{
-		URL:            target.String(),
-		DestDir:        destDir,
-		Filename:       sanitizeRequestedName(req.Filename),
+		URL:      target.String(),
+		DestDir:  destDir,
+		Filename: sanitizeRequestedName(req.Filename),
+		// The canonical matched root, not the caller's raw spelling: the
+		// indexer records this string verbatim, and a variant (trailing
+		// slash, case) would fork the root in the database, breaking the
+		// destination list and the absence sweep.
+		DestRoot:       matchedRoot,
 		ExpectedSHA256: strings.TrimSpace(req.SHA256),
 		ExpectedSize:   req.Size,
 	}
 
-	// Run detached from the request. A model is gigabytes over a throttled
-	// public API; holding the HTTP connection open for it would tie the
-	// download's fate to a browser tab. Progress is polled instead.
-	go func() {
-		finished, err := s.cfg.Downloads.Fetch(context.Background(), job)
-		if err != nil || finished.State != download.StateComplete {
-			return
-		}
-		// Index it immediately so the library reflects reality without a manual
-		// rescan, and so browse flips this result from new to have.
-		if _, err := scan.IndexFile(s.cfg.Store, finished.FinalPath, req.DestRoot); err != nil {
-			_ = err
-		}
-	}()
+	// Start registers the job synchronously and runs the transfer detached
+	// from the request — a model is gigabytes over a throttled public API,
+	// and holding the connection open would tie the download's fate to a
+	// browser tab. Synchronous registration is what lets the ID go back in
+	// the 202: the client's first poll is guaranteed to see the job.
+	started, err := s.cfg.Downloads.Start(context.Background(), job)
+	if errors.Is(err, download.ErrInFlight) {
+		// Not an error from the user's point of view — the thing they asked
+		// for is already happening. 409 with the ID lets the client attach to
+		// the in-progress job instead of showing a failure.
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "a download for this file is already in progress",
+			"id":    started.ID,
+		})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "could not start download", err.Error())
+		return
+	}
 
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"status":   "started",
+		"id":       started.ID,
 		"dest_dir": destDir,
 	})
+}
+
+// handleCancelDownload handles DELETE /api/downloads/{id}.
+//
+// In flight → cancel (202); terminal → forget the record (200); unknown →
+// 404. Terminal jobs are only evicted on request: the queue is history the
+// user may still be reading, not a buffer to trim. No readOnlyGuard — a
+// read-only daemon never constructs a Manager, and cancelling writes nothing.
+func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Downloads == nil {
+		writeError(w, http.StatusServiceUnavailable, "downloading is disabled")
+		return
+	}
+	id := r.PathValue("id")
+	if s.cfg.Downloads.Cancel(id) {
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancelling"})
+		return
+	}
+	if s.cfg.Downloads.Remove(id) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+		return
+	}
+	writeError(w, http.StatusNotFound, "no such download", id)
 }
 
 func (s *Server) handleListDownloads(w http.ResponseWriter, r *http.Request) {
@@ -162,20 +198,24 @@ func (s *Server) scannedRoots() ([]string, error) {
 	return roots, rows.Err()
 }
 
-// resolveDestination validates a requested destination and returns it absolute.
+// resolveDestination validates a requested destination.
+//
+// Returns the absolute directory to write into and the canonical matched root
+// (the database's own spelling, which is what any recording against the root
+// must use — the caller's variant would fork the root string).
 //
 // The root must be one already scanned, and the final directory must still be
 // inside it after symlinks are resolved -- a subdirectory that is a symlink out
 // of the tree would otherwise be a way to write anywhere the daemon can reach.
-func (s *Server) resolveDestination(root, subdir string) (string, error) {
+func (s *Server) resolveDestination(root, subdir string) (string, string, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
-		return "", fmt.Errorf("no destination root given")
+		return "", "", fmt.Errorf("no destination root given")
 	}
 
 	known, err := s.scannedRoots()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	matched := ""
 	for _, k := range known {
@@ -185,12 +225,12 @@ func (s *Server) resolveDestination(root, subdir string) (string, error) {
 		}
 	}
 	if matched == "" {
-		return "", fmt.Errorf("%s is not a scanned model root", root)
+		return "", "", fmt.Errorf("%s is not a scanned model root", root)
 	}
 
 	rootAbs, err := filepath.Abs(matched)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	// Resolve the root itself too, so both sides of the containment check are
 	// expressed in the same terms.
@@ -206,11 +246,20 @@ func (s *Server) resolveDestination(root, subdir string) (string, error) {
 	// EvalSymlinks fails for a directory that does not exist yet, which is a
 	// legitimate case for a new subdirectory. Check the nearest existing parent
 	// instead, since that is what determines where the write actually lands.
+	//
+	// Only a genuinely-missing component may walk up. Any other error — a
+	// permission-denied directory, an I/O fault — is a refusal, because
+	// climbing past a component we could not inspect would climb past exactly
+	// the symlink this check exists to catch.
 	check := destAbs
 	for {
-		if resolved, err := filepath.EvalSymlinks(check); err == nil {
+		resolved, err := filepath.EvalSymlinks(check)
+		if err == nil {
 			check = resolved
 			break
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", "", fmt.Errorf("cannot verify destination: %v", err)
 		}
 		parent := filepath.Dir(check)
 		if parent == check {
@@ -219,12 +268,12 @@ func (s *Server) resolveDestination(root, subdir string) (string, error) {
 		check = parent
 	}
 	if !withinRoot(rootAbs, check) {
-		return "", fmt.Errorf("destination escapes the model root")
+		return "", "", fmt.Errorf("destination escapes the model root")
 	}
 	if !withinRoot(rootAbs, destAbs) {
-		return "", fmt.Errorf("destination escapes the model root")
+		return "", "", fmt.Errorf("destination escapes the model root")
 	}
-	return destAbs, nil
+	return destAbs, matched, nil
 }
 
 // cleanSubdir reduces a requested subdirectory to a safe relative path.

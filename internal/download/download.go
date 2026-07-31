@@ -6,6 +6,19 @@
 // auth-gated models, rate limiting, resumable multi-GB transfers, partial-file
 // quarantine, and checksum verification before the file is admitted to the
 // index.
+//
+// Job lifecycle:
+//
+//	pending → downloading → verifying → complete
+//	              |             |→ quarantined  (hash/size mismatch; partial moved aside)
+//	              |→ failed                      (partial kept — resumable)
+//	              |→ cancelled                   (partial kept — resumable)
+//
+// A job is in flight while pending, downloading or verifying; starting the
+// same ID again during that window fails with ErrInFlight. Once terminal, the
+// same ID may be started again: the record is replaced and the transfer
+// resumes from whatever partial remains. The ID stays deterministic
+// (hash of URL+filename) because it names the .part file that resume needs.
 package download
 
 import (
@@ -20,6 +33,8 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,9 +44,18 @@ import (
 // promised.
 var ErrChecksumMismatch = errors.New("download: checksum mismatch")
 
+// ErrSizeMismatch means the byte count differs from what the listing promised.
+// Only checked when no expected hash is available: a hash subsumes it.
+var ErrSizeMismatch = errors.New("download: size mismatch")
+
 // ErrNoSpace is a disk-full condition, worth distinguishing because the fix is
 // not "retry".
 var ErrNoSpace = errors.New("download: no space left on device")
+
+// ErrInFlight means this job ID is already being transferred. The caller gets
+// the current job snapshot alongside it, so an HTTP layer can answer with the
+// in-progress state rather than an opaque refusal.
+var ErrInFlight = errors.New("download: job already in flight")
 
 // State is where a job is.
 type State string
@@ -46,6 +70,15 @@ const (
 	StateCancelled   State = "cancelled"
 )
 
+// terminal reports whether a state is final.
+func terminal(s State) bool {
+	switch s {
+	case StateComplete, StateFailed, StateQuarantined, StateCancelled:
+		return true
+	}
+	return false
+}
+
 // Job is one download.
 type Job struct {
 	ID  string `json:"id"`
@@ -54,6 +87,12 @@ type Job struct {
 	// DestDir and Filename are where the file lands once it is verified.
 	DestDir  string `json:"dest_dir"`
 	Filename string `json:"filename"`
+
+	// DestRoot is the canonical scanned root DestDir sits under. Set by the
+	// API layer from its allowlist match, and used when indexing the finished
+	// file — recording the caller's raw spelling instead would fork the root
+	// string in the database (trailing slash, case, symlinks).
+	DestRoot string `json:"dest_root,omitempty"`
 
 	// ExpectedSHA256, when known, is checked before the file is admitted. An
 	// empty value means the download is accepted on arrival, which is weaker and
@@ -67,6 +106,15 @@ type Job struct {
 	Error      string `json:"error,omitempty"`
 	ActualSHA  string `json:"actual_sha256,omitempty"`
 	FinalPath  string `json:"final_path,omitempty"`
+
+	// QuarantinePath is where rejected bytes were moved. Quarantine means "not
+	// admitted", not "destroyed" — but the .part name must be freed, or every
+	// retry of this URL would resume from the poisoned bytes forever.
+	QuarantinePath string `json:"quarantine_path,omitempty"`
+
+	// IndexError records a post-download indexing failure: the file is
+	// verified and in place, the library just does not show it yet.
+	IndexError string `json:"index_error,omitempty"`
 
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`
@@ -88,14 +136,31 @@ type Manager struct {
 	WorkDir string
 
 	HTTP      *http.Client
-	APIKey    string
 	UserAgent string
+
+	// TokenFor returns the bearer credential to send to a URL, or "" for
+	// none. Selection is host-scoped by the caller (origin.Client.TokenFor),
+	// so a Civitai key is never handed to huggingface.co and vice versa. Nil
+	// means every request goes out unauthenticated. A single key field here
+	// would be wrong by construction: one Manager serves downloads from
+	// several unrelated providers.
+	TokenFor func(url string) string
+
+	// OnComplete, when set, runs after a job reaches StateComplete, outside
+	// the manager lock. A non-empty return is recorded as the job's
+	// IndexError. This is how the daemon indexes a finished file without the
+	// download package importing the store.
+	OnComplete func(Job) string
 
 	// MaxRetries bounds resume attempts for one job.
 	MaxRetries int
 
-	mu   sync.Mutex
-	jobs map[string]*Job
+	// mu protects jobs, running, and every *Job the maps point at. It is
+	// never held across network or disk I/O; transfers mutate their job only
+	// through update().
+	mu      sync.Mutex
+	jobs    map[string]*Job
+	running map[string]context.CancelFunc
 }
 
 // NewManager returns a Manager storing partials under workDir.
@@ -117,10 +182,14 @@ func NewManager(workDir string) (*Manager, error) {
 		UserAgent:  "model-manager/1.0 (+https://github.com/socrasteeze/model-manager)",
 		MaxRetries: 5,
 		jobs:       map[string]*Job{},
+		running:    map[string]context.CancelFunc{},
 	}, nil
 }
 
-// Jobs returns a snapshot of every job.
+// Jobs returns a snapshot of every job, oldest first.
+//
+// Sorted because the map's iteration order is randomized per call, and a
+// polling UI rendering a reshuffled queue once a second reads as broken.
 func (m *Manager) Jobs() []Job {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -128,6 +197,12 @@ func (m *Manager) Jobs() []Job {
 	for _, j := range m.jobs {
 		out = append(out, *j)
 	}
+	sort.Slice(out, func(i, k int) bool {
+		if !out[i].StartedAt.Equal(out[k].StartedAt) {
+			return out[i].StartedAt.Before(out[k].StartedAt)
+		}
+		return out[i].ID < out[k].ID
+	})
 	return out
 }
 
@@ -150,30 +225,123 @@ func (m *Manager) update(id string, fn func(*Job)) {
 	}
 }
 
-// Fetch downloads a file, verifies it, and moves it into place.
+// begin claims an ID for a new transfer.
 //
-// The returned Job is a snapshot of the final state; the file is only at
-// FinalPath when State is StateComplete.
-func (m *Manager) Fetch(ctx context.Context, job Job) (Job, error) {
-	if job.ID == "" {
-		job.ID = jobID(job.URL, job.Filename)
-	}
-	if job.Filename == "" {
-		job.Filename = filenameFromURL(job.URL)
-	}
-	if job.DestDir == "" {
-		return job, errors.New("download: no destination directory")
+// An in-flight duplicate is rejected: two transfers appending to the same
+// .part file interleave their streams into byte garbage, so presence in
+// `running` is checked and set under one lock acquisition — there is no
+// window in which two callers can both claim the ID. A terminal record is
+// replaced, which is what makes retry work.
+func (m *Manager) begin(job *Job, cancel context.CancelFunc) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, inFlight := m.running[job.ID]; inFlight {
+		return ErrInFlight
 	}
 	job.State = StatePending
 	job.StartedAt = time.Now()
+	m.jobs[job.ID] = job
+	m.running[job.ID] = cancel
+	return nil
+}
 
+// end releases the in-flight claim.
+func (m *Manager) end(id string) {
 	m.mu.Lock()
-	m.jobs[job.ID] = &job
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	delete(m.running, id)
+}
 
+// Cancel stops an in-flight job. Returns false for unknown or terminal IDs.
+func (m *Manager) Cancel(id string) bool {
+	m.mu.Lock()
+	cancel, ok := m.running[id]
+	m.mu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel()
+	return true
+}
+
+// Remove forgets a terminal job. Returns false while in flight — a running
+// transfer must be cancelled, not orphaned.
+func (m *Manager) Remove(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, inFlight := m.running[id]; inFlight {
+		return false
+	}
+	if _, ok := m.jobs[id]; !ok {
+		return false
+	}
+	delete(m.jobs, id)
+	return true
+}
+
+// normalize fills the derived job fields.
+func normalize(job *Job) error {
+	if job.Filename == "" {
+		job.Filename = filenameFromURL(job.URL)
+	}
+	if job.ID == "" {
+		job.ID = jobID(job.URL, job.Filename)
+	}
+	if job.DestDir == "" {
+		return errors.New("download: no destination directory")
+	}
+	return nil
+}
+
+// Fetch downloads a file synchronously, verifies it, and moves it into place.
+//
+// The returned Job is a snapshot of the final state; the file is only at
+// FinalPath when State is StateComplete. A duplicate of an in-flight job
+// returns that job's current snapshot and ErrInFlight.
+func (m *Manager) Fetch(ctx context.Context, job Job) (Job, error) {
+	if err := normalize(&job); err != nil {
+		return job, err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if err := m.begin(&job, cancel); err != nil {
+		current, _ := m.Job(job.ID)
+		return current, err
+	}
+	defer m.end(job.ID)
+	return m.run(runCtx, job)
+}
+
+// Start registers a job and runs the transfer in the background.
+//
+// Registration is synchronous: the returned snapshot is StatePending and
+// already visible to Jobs()/Job(), so an HTTP caller can hand its client the
+// ID before the first byte moves. Without this the client's first poll can
+// race the goroutine, see nothing, and give up on polling entirely.
+func (m *Manager) Start(ctx context.Context, job Job) (Job, error) {
+	if err := normalize(&job); err != nil {
+		return job, err
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	if err := m.begin(&job, cancel); err != nil {
+		cancel()
+		current, _ := m.Job(job.ID)
+		return current, err
+	}
+	snapshot := job
+	go func() {
+		defer cancel()
+		defer m.end(job.ID)
+		m.run(runCtx, job)
+	}()
+	return snapshot, nil
+}
+
+// run is the transfer body shared by Fetch and Start.
+func (m *Manager) run(ctx context.Context, job Job) (Job, error) {
 	partial := filepath.Join(m.WorkDir, job.ID+".part")
 
-	if err := m.transfer(ctx, job.ID, job.URL, partial); err != nil {
+	fail := func(err error) (Job, error) {
 		m.update(job.ID, func(j *Job) {
 			j.State = StateFailed
 			j.Error = err.Error()
@@ -186,17 +354,15 @@ func (m *Manager) Fetch(ctx context.Context, job Job) (Job, error) {
 		return final, err
 	}
 
+	if err := m.transfer(ctx, job.ID, job.URL, partial); err != nil {
+		return fail(err)
+	}
+
 	m.update(job.ID, func(j *Job) { j.State = StateVerifying })
 
 	sum, size, err := hashFile(partial)
 	if err != nil {
-		m.update(job.ID, func(j *Job) {
-			j.State = StateFailed
-			j.Error = err.Error()
-			j.FinishedAt = time.Now()
-		})
-		final, _ := m.Job(job.ID)
-		return final, err
+		return fail(err)
 	}
 
 	m.update(job.ID, func(j *Job) {
@@ -204,29 +370,24 @@ func (m *Manager) Fetch(ctx context.Context, job Job) (Job, error) {
 		j.Downloaded = size
 	})
 
-	// The check that keeps a corrupt or substituted file out of the index. A
-	// mismatch leaves the partial in the work directory rather than deleting it:
-	// the bytes may be worth inspecting, and quarantine means "not admitted",
-	// not "destroyed".
+	// The checks that keep a corrupt or substituted file out of the index.
+	// ActualSHA is recorded above before the partial is moved, so the
+	// evidence of what actually arrived survives quarantine.
 	if job.ExpectedSHA256 != "" && !strings.EqualFold(sum, job.ExpectedSHA256) {
-		m.update(job.ID, func(j *Job) {
-			j.State = StateQuarantined
-			j.Error = fmt.Sprintf("expected %s, got %s", job.ExpectedSHA256, sum)
-			j.FinishedAt = time.Now()
-		})
-		final, _ := m.Job(job.ID)
-		return final, fmt.Errorf("%w: %s", ErrChecksumMismatch, final.Error)
+		reason := fmt.Sprintf("expected %s, got %s", strings.ToLower(job.ExpectedSHA256), sum)
+		return m.reject(job.ID, partial, reason, ErrChecksumMismatch)
+	}
+	// Without a hash, the promised size is the only independent fact to check
+	// against. It catches the classic failure: an HTML interstitial served
+	// with a 200 landing on disk under a .safetensors name.
+	if job.ExpectedSHA256 == "" && job.ExpectedSize > 0 && size != job.ExpectedSize {
+		reason := fmt.Sprintf("expected %d bytes, got %d", job.ExpectedSize, size)
+		return m.reject(job.ID, partial, reason, ErrSizeMismatch)
 	}
 
 	dest, err := m.publish(partial, job.DestDir, job.Filename)
 	if err != nil {
-		m.update(job.ID, func(j *Job) {
-			j.State = StateFailed
-			j.Error = err.Error()
-			j.FinishedAt = time.Now()
-		})
-		final, _ := m.Job(job.ID)
-		return final, err
+		return fail(err)
 	}
 
 	m.update(job.ID, func(j *Job) {
@@ -234,8 +395,43 @@ func (m *Manager) Fetch(ctx context.Context, job Job) (Job, error) {
 		j.FinalPath = dest
 		j.FinishedAt = time.Now()
 	})
+
+	if m.OnComplete != nil {
+		final, _ := m.Job(job.ID)
+		if msg := m.OnComplete(final); msg != "" {
+			m.update(job.ID, func(j *Job) { j.IndexError = msg })
+		}
+	}
+
 	final, _ := m.Job(job.ID)
 	return final, nil
+}
+
+// reject quarantines a partial whose content failed verification.
+func (m *Manager) reject(id, partial, reason string, sentinel error) (Job, error) {
+	q := m.quarantine(partial, id)
+	m.update(id, func(j *Job) {
+		j.State = StateQuarantined
+		j.Error = reason
+		j.QuarantinePath = q
+		j.FinishedAt = time.Now()
+	})
+	final, _ := m.Job(id)
+	return final, fmt.Errorf("%w: %s", sentinel, reason)
+}
+
+// quarantine moves a rejected partial out of the resume path, keeping the
+// bytes for inspection. uniquePath means a second quarantine of the same job
+// never overwrites earlier evidence. If even the rename fails, the partial is
+// removed: clearing the resume path outranks keeping evidence, because a
+// poisoned .part silently corrupts every future retry of this URL.
+func (m *Manager) quarantine(partial, id string) string {
+	q := uniquePath(filepath.Join(m.WorkDir, id+".quarantine"))
+	if err := os.Rename(partial, q); err != nil {
+		_ = os.Remove(partial)
+		return ""
+	}
+	return q
 }
 
 // transfer downloads to a partial file, resuming where it left off.
@@ -255,11 +451,15 @@ func (m *Manager) transfer(ctx context.Context, id, url, partial string) error {
 			return err
 		}
 		req.Header.Set("User-Agent", m.UserAgent)
-		if m.APIKey != "" {
-			// Civitai gates some models behind an account. Without this the
-			// server returns an HTML login page with a 200, which would
-			// otherwise be written to disk and named .safetensors.
-			req.Header.Set("Authorization", "Bearer "+m.APIKey)
+		// Host-scoped: some providers gate models behind an account, and
+		// without the right credential the server returns an HTML login page
+		// with a 200 that would otherwise be written to disk and named
+		// .safetensors. But the credential must match the host — see the
+		// TokenFor field.
+		if m.TokenFor != nil {
+			if tok := m.TokenFor(url); tok != "" {
+				req.Header.Set("Authorization", "Bearer "+tok)
+			}
 		}
 		if existing > 0 {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existing))
@@ -288,13 +488,23 @@ func (m *Manager) transfer(ctx context.Context, id, url, partial string) error {
 			// over rather than appending a second copy onto the first.
 			existing = 0
 		case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
-			// Already have the whole thing.
+			// "Content-Range: bytes */<total>" carries the real size. Only a
+			// partial that exactly matches it is complete; an oversized one
+			// (e.g. an appended error page from an earlier run) must be
+			// restarted, not declared done.
+			total := totalFromContentRange(resp.Header.Get("Content-Range"))
 			resp.Body.Close()
-			return nil
+			if total > 0 && total == existing {
+				return nil
+			}
+			if err := os.Truncate(partial, 0); err != nil {
+				return fmt.Errorf("download: truncating oversized partial: %w", err)
+			}
+			continue // consumes an attempt, so a 416 loop still terminates
 		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 			resp.Body.Close()
 			return fmt.Errorf(
-				"download: %s returned %d — this model may require a Civitai API key (--api-key)",
+				"download: %s returned %d — this model may require an API key for its provider",
 				url, resp.StatusCode)
 		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
 			resp.Body.Close()
@@ -357,6 +567,23 @@ func (m *Manager) transfer(ctx context.Context, id, url, partial string) error {
 		}
 	}
 	return fmt.Errorf("download: gave up on %s", url)
+}
+
+// totalFromContentRange parses the total from "bytes */<total>".
+func totalFromContentRange(v string) int64 {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(v), "bytes ")
+	if !ok {
+		return 0
+	}
+	i := strings.LastIndex(rest, "/")
+	if i < 0 {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(rest[i+1:]), 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 func (m *Manager) copyTracking(ctx context.Context, id string, dst io.Writer, src io.Reader, start int64) (int64, error) {

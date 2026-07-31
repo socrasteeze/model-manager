@@ -111,6 +111,19 @@ func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Single flight. An update check is one upstream request per owned model
+	// with a 30-minute budget; concurrent invocations would multiply that
+	// against a rate-limited public API. On the loopback default this
+	// endpoint is also reachable without a credential by anything that can
+	// make the browser fetch a URL, so the cap doubles as abuse containment:
+	// N injected <img> tags get one sweep, not N.
+	if !s.updateCheck.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, "an update check is already running",
+			"wait for it to finish; concurrent checks would multiply requests against the provider")
+		return
+	}
+	defer s.updateCheck.Store(false)
+
 	idx, err := origin.BuildLocalIndex(s.cfg.Store)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not index the library", err.Error())

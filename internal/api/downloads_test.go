@@ -6,11 +6,14 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/store"
@@ -50,7 +53,7 @@ func TestResolveDestinationAcceptsScannedRoot(t *testing.T) {
 	root := t.TempDir()
 	s := serverWithRoot(t, root, nil)
 
-	got, err := s.resolveDestination(root, "loras/style")
+	got, _, err := s.resolveDestination(root, "loras/style")
 	if err != nil {
 		t.Fatalf("rejected a legitimate destination: %v", err)
 	}
@@ -67,7 +70,7 @@ func TestResolveDestinationRejectsUnknownRoot(t *testing.T) {
 
 	// A directory that exists and is writable, but was never scanned. Existing
 	// on disk is not what makes a destination legal.
-	if _, err := s.resolveDestination(other, ""); err == nil {
+	if _, _, err := s.resolveDestination(other, ""); err == nil {
 		t.Fatal("accepted a root that was never scanned")
 	}
 }
@@ -83,7 +86,7 @@ func TestResolveDestinationRejectsTraversal(t *testing.T) {
 		"/etc",
 		"..\\..\\windows",
 	} {
-		got, err := s.resolveDestination(root, subdir)
+		got, _, err := s.resolveDestination(root, subdir)
 		if err != nil {
 			continue // rejected outright, also fine
 		}
@@ -108,7 +111,7 @@ func TestResolveDestinationRejectsSymlinkEscape(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 
-	if got, err := s.resolveDestination(root, "sneaky"); err == nil {
+	if got, _, err := s.resolveDestination(root, "sneaky"); err == nil {
 		resolved, _ := filepath.EvalSymlinks(got)
 		outsideResolved, _ := filepath.EvalSymlinks(outside)
 		if strings.HasPrefix(resolved, outsideResolved) {
@@ -198,5 +201,59 @@ func TestCleanSubdirStripsTraversal(t *testing.T) {
 		if got := cleanSubdir(in); got != want {
 			t.Errorf("cleanSubdir(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The bundled UI's own asset requests carry no header and no query parameter —
+// the browser issues them. The cookie minted when /?token= validates is what
+// lets them through, and without it the UI is a blank page in exactly the
+// off-loopback deployment the token exists for.
+func TestAssetsAuthenticateViaCookie(t *testing.T) {
+	s := serverWithRoot(t, t.TempDir(), func(c *Config) {
+		c.Security = Security{RequireToken: true, Token: "sekrit"}
+		c.UI = fstest.MapFS{
+			"index.html":    {Data: []byte("<html><head></head><body></body></html>")},
+			"assets/app.js": {Data: []byte("console.log(1)")},
+		}
+	})
+
+	// An asset with no credential is refused — that is the point of the token.
+	if w := do(s, "GET", "http://localhost/assets/app.js", "", nil); w.Code != 401 {
+		t.Fatalf("uncredentialed asset: status %d, want 401", w.Code)
+	}
+
+	// Opening the page with the token mints the cookie.
+	w := do(s, "GET", "http://localhost/?token=sekrit", "", nil)
+	if w.Code != 200 {
+		t.Fatalf("page load: status %d", w.Code)
+	}
+	var cookie string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "mm_token" {
+			cookie = c.Value
+			if !c.HttpOnly || c.SameSite != http.SameSiteStrictMode {
+				t.Fatalf("cookie not scoped tightly: %+v", c)
+			}
+		}
+	}
+	if cookie != "sekrit" {
+		t.Fatalf("cookie = %q, want the validated token", cookie)
+	}
+
+	// A wrong query token must never be echoed into a cookie.
+	bad := do(s, "GET", "http://localhost/?token=wrong", "", nil)
+	for _, c := range bad.Result().Cookies() {
+		if c.Name == "mm_token" {
+			t.Fatal("an invalid token was persisted into a cookie")
+		}
+	}
+
+	// The asset request, as a browser would send it: cookie only.
+	req := httptest.NewRequest("GET", "http://localhost/assets/app.js", nil)
+	req.AddCookie(&http.Cookie{Name: "mm_token", Value: cookie})
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("asset with cookie: status %d, want 200", rec.Code)
 	}
 }

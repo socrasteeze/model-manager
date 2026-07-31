@@ -213,6 +213,10 @@ func (s *Security) trustedRemote(r *http.Request) bool {
 	return false
 }
 
+// tokenCookieName carries the token for requests the app cannot decorate:
+// the UI's own asset loads, which the browser issues on its own.
+const tokenCookieName = "mm_token"
+
 func bearerToken(r *http.Request) string {
 	if h := r.Header.Get("Authorization"); h != "" {
 		if after, ok := strings.CutPrefix(h, "Bearer "); ok {
@@ -222,7 +226,17 @@ func bearerToken(r *http.Request) string {
 	// A header-only design would make it impossible to open a preview image in a
 	// new browser tab, so the query parameter is accepted as well. It is no
 	// weaker: both are same-origin values the page already holds.
-	return r.URL.Query().Get("token")
+	if t := r.URL.Query().Get("token"); t != "" {
+		return t
+	}
+	// And the cookie set when /?token= validated, which is how the page's own
+	// script/stylesheet requests authenticate. SameSite=Strict on the cookie
+	// plus the Origin check above keep this from becoming ambient authority
+	// for another site.
+	if c, err := r.Cookie(tokenCookieName); err == nil {
+		return c.Value
+	}
+	return ""
 }
 
 // middleware applies the security baseline to every request.
@@ -261,6 +275,32 @@ func (s *Security) middleware(next http.Handler) http.Handler {
 			http.Error(w, "Unauthorized: a bearer token is required when not bound to loopback",
 				http.StatusUnauthorized)
 			return
+		}
+
+		// A request that presented a valid ?token= gets the same credential as
+		// a cookie. This is what makes the bundled UI work off-loopback: the
+		// page's own <script src> and <link href> requests carry neither an
+		// Authorization header nor a query parameter — the browser issues
+		// them, not the app — so without a cookie they 401 and the UI is a
+		// blank page in exactly the deployment the token exists for.
+		//
+		// The query value is re-validated on its own rather than trusting that
+		// authorized() passed: the request may have authenticated via header
+		// while carrying an unrelated token parameter, and a cookie must never
+		// hold anything but the real credential. Scoped as tightly as a cookie
+		// can be: HttpOnly (no script access), SameSite Strict (never sent
+		// cross-site), session lifetime.
+		if s.RequireToken {
+			if q := r.URL.Query().Get("token"); q != "" &&
+				subtle.ConstantTimeCompare([]byte(q), []byte(s.Token)) == 1 {
+				http.SetCookie(w, &http.Cookie{
+					Name:     tokenCookieName,
+					Value:    q,
+					Path:     "/",
+					HttpOnly: true,
+					SameSite: http.SameSiteStrictMode,
+				})
+			}
 		}
 
 		// Defence in depth for the served UI and for any preview blob: no

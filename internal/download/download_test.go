@@ -93,10 +93,29 @@ func TestChecksumMismatchQuarantines(t *testing.T) {
 	}
 
 	// Quarantine means "not admitted", not "destroyed" -- the bytes stay for
-	// inspection.
+	// inspection. But they move OUT of the .part name: a poisoned partial left
+	// on the resume path would corrupt every future retry of this URL.
+	quarantined, _ := filepath.Glob(filepath.Join(m.WorkDir, "*.quarantine*"))
+	if len(quarantined) != 1 {
+		t.Fatalf("%d quarantine files kept, want exactly one", len(quarantined))
+	}
+	if job.QuarantinePath == "" {
+		t.Fatal("QuarantinePath not recorded on the job")
+	}
 	partials, _ := filepath.Glob(filepath.Join(m.WorkDir, "*.part"))
-	if len(partials) != 1 {
-		t.Fatalf("%d partial files kept, want the quarantined one", len(partials))
+	if len(partials) != 0 {
+		t.Fatalf("%d .part files remain; the resume path must be clear after quarantine", len(partials))
+	}
+
+	// And the retry that the old behavior made impossible: the same URL fetched
+	// again with the right expectation starts clean and completes.
+	retry, err := m.Fetch(context.Background(), Job{
+		URL:            srv.URL + "/m.safetensors",
+		DestDir:        dest,
+		ExpectedSHA256: sha256Of([]byte("not what was promised")),
+	})
+	if err != nil || retry.State != StateComplete {
+		t.Fatalf("retry after quarantine failed: %v (%s)", err, retry.State)
 	}
 }
 
@@ -222,7 +241,7 @@ func TestAuthFailureIsReportedWithTheFix(t *testing.T) {
 	}
 
 	// With the key, the same request succeeds.
-	m.APIKey = "secret"
+	m.TokenFor = func(string) string { return "secret" }
 	job, err := m.Fetch(context.Background(), Job{
 		URL:     srv.URL + "/gated.safetensors",
 		DestDir: filepath.Join(t.TempDir(), "models"),
