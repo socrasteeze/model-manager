@@ -1334,3 +1334,74 @@ a.ghost {
   margin-left: 0.35rem;
   color: var(--accent);
 }
+
+/* Workflow source picker: inherit / file / paste, per family. */
+.workflow-source {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.6rem 0;
+}
+
+.workflow-source .chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.workflow-source select,
+.workflow-source textarea {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.35rem 0.55rem;
+  font-family: inherit;
+  font-size: 0.85rem;
+  width: 100%;
+}
+
+.workflow-source textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.workflow-source select option:disabled {
+  color: var(--text-dim);
+}
+
+.workflow-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.workflow-actions button {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.28rem 0.65rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.workflow-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.workflow-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* A warning sits under the status line rather than beside it: they are
+   sentences, not labels. */
+.warn-line {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--warn);
+}

@@ -61,6 +61,7 @@ COMMANDS
     detect     Find installed SD tools and their model roots
     reindex    Rebuild the search index and re-resolve every record
     thumbs     Derive grid-sized copies of previews that lack one
+    comfy      Check and plan ComfyUI workflows for thumbnail rendering
     report     Summarize the index: distinct models, duplication, size spread
     verify     Re-read files and check the index against the disk
     bench      Compare hashing throughput at different worker counts
@@ -110,6 +111,8 @@ func main() {
 		err = cmdReindex(os.Args[2:])
 	case "thumbs":
 		err = cmdThumbs(ctx, os.Args[2:])
+	case "comfy":
+		err = cmdComfy(ctx, os.Args[2:])
 	case "report":
 		err = cmdReport(os.Args[2:])
 	case "verify":

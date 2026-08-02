@@ -261,6 +261,11 @@ func (c *Client) getJSON(ctx context.Context, path string, into any) error {
 	return json.NewDecoder(io.LimitReader(res.Body, 8<<20)).Decode(into)
 }
 
+// CheckAPIFormat reports whether a graph is the API form ComfyUI accepts.
+// Exported so callers importing a graph from elsewhere can say what is wrong
+// with it before storing it.
+func CheckAPIFormat(graph json.RawMessage) error { return checkAPIFormat(graph) }
+
 // checkAPIFormat rejects an editor-format graph before it is sent.
 //
 // The two are easy to tell apart and impossible to convert between here: the

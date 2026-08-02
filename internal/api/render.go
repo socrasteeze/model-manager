@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/comfy"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/thumb"
 )
 
 // comfyClient builds a client from the configured address.
@@ -55,15 +57,26 @@ func (s *Server) comfyClient() (*comfy.Client, error) {
 //
 // Stored as {"<family>": <workflow>, "": <default>}. A bare string or object,
 // as earlier versions stored, is read as the default for everything.
-func (s *Server) workflowTemplate(family string) json.RawMessage {
+func (s *Server) workflowTemplate(family string) (json.RawMessage, error) {
 	byFamily, fallback := s.workflowSettings()
 	if wf, ok := byFamily[family]; ok && len(wf) > 0 {
-		return wf
+		return s.resolveSlot(wf)
 	}
 	if len(fallback) > 0 {
-		return fallback
+		return s.resolveSlot(fallback)
 	}
-	return comfy.DefaultWorkflow
+	return comfy.DefaultWorkflow, nil
+}
+
+// resolveSlot turns a stored slot into a graph. A slot holds either the graph
+// itself or the name of a file holding it; naming a file is preferred because
+// the workflow then stays editable in ComfyUI and the next render picks the
+// edit up.
+func (s *Server) resolveSlot(slot json.RawMessage) (json.RawMessage, error) {
+	if looksLikePath(string(slot)) {
+		return s.loadWorkflowFile(string(slot))
+	}
+	return slot, nil
 }
 
 // workflowSettings decodes the stored workflow setting into a per-family map
@@ -78,6 +91,9 @@ func (s *Server) workflowSettings() (map[string]json.RawMessage, json.RawMessage
 	// A JSON string is a whole workflow pasted into a textarea, which earlier
 	// versions stored directly. Kept working rather than migrated: it is the
 	// same thing as "the default for every family".
+	// A JSON string is either a whole workflow pasted into a textarea or the
+	// name of a file holding one. Both are carried through as-is and told apart
+	// at resolution time by whether they start with a brace.
 	var asString string
 	if err := json.Unmarshal(raw, &asString); err == nil {
 		if strings.TrimSpace(asString) == "" {
@@ -202,10 +218,15 @@ func (s *Server) handleRenderPreview(w http.ResponseWriter, r *http.Request) {
 
 	template := req.Workflow
 	if len(template) == 0 {
-		template = s.workflowTemplate(vars.BaseModel)
+		loaded, err := s.workflowTemplate(vars.BaseModel)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "could not load the workflow", err.Error())
+			return
+		}
+		template = loaded
 	}
 
-	graph, err := comfy.Fill(template, vars)
+	graph, _, err := s.prepareGraph(template, vars)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "workflow could not be prepared", err.Error())
 		return
@@ -234,6 +255,29 @@ func (s *Server) handleRenderPreview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"render": job})
 }
 
+// prepareGraph turns a stored template into the graph that will actually be
+// queued for one model.
+//
+// Two passes, in this order. Fill substitutes any {{placeholders}} the author
+// wrote, which is the precise-control path. Rewire then adapts whatever is left
+// -- finding the lora loader, the checkpoint input, the sampler seed and the
+// traced prompt nodes -- which is what makes an unmodified ComfyUI template
+// work with no editing at all. Rewire skips anything Fill already set, so the
+// two never fight.
+func (s *Server) prepareGraph(template json.RawMessage, vars comfy.Vars) (
+	json.RawMessage, *comfy.RewireResult, error,
+) {
+	filled, err := comfy.Fill(template, vars)
+	if err != nil {
+		return nil, nil, err
+	}
+	rewired, err := comfy.Rewire(filled, template, vars)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rewired.Graph, rewired, nil
+}
+
 // renderVars gathers what a template can substitute for this model.
 func (s *Server) renderVars(sha string, detail *ModelDetail, req renderRequest) comfy.Vars {
 	v := comfy.Vars{
@@ -247,9 +291,6 @@ func (s *Server) renderVars(sha string, detail *ModelDetail, req renderRequest) 
 		// picture. A thumbnail that changes on every regeneration makes "did my
 		// edit help?" unanswerable.
 		v.Seed = comfy.SeedFor(sha)
-	}
-	if v.Negative == "" {
-		v.Negative = comfy.DefaultNegative
 	}
 	// The model's own filename as ComfyUI would load it. Not the full path: a
 	// ComfyUI node names a file relative to its models directory, and the
@@ -282,6 +323,104 @@ func filenameOnly(path string) string {
 		return path[i+1:]
 	}
 	return path
+}
+
+// handleRenderPlan handles POST /api/models/{sha}/previews/render/plan.
+//
+// Everything a render would do, minus the render: which workflow was chosen,
+// what got rewritten, and what looks wrong about it. Spending someone else's
+// GPU for thirty seconds to find out the graph names the wrong lora is a bad
+// way to learn that.
+func (s *Server) handleRenderPlan(w http.ResponseWriter, r *http.Request) {
+	sha := strings.ToLower(r.PathValue("sha"))
+	detail, err := s.modelDetail(sha)
+	if err != nil || detail == nil {
+		writeError(w, http.StatusNotFound, "no such model", sha)
+		return
+	}
+
+	var req renderRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
+	}
+	vars := s.renderVars(sha, detail, req)
+
+	source := "configured"
+	template := req.Workflow
+	if len(template) == 0 {
+		loaded, err := s.workflowTemplate(vars.BaseModel)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "could not load the workflow", err.Error())
+			return
+		}
+		template = loaded
+	} else {
+		source = "request"
+	}
+
+	graph, rewired, err := s.prepareGraph(template, vars)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "workflow could not be prepared", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"base_model":    vars.BaseModel,
+		"source":        source,
+		"model":         vars.Model,
+		"checkpoint":    vars.Checkpoint,
+		"seed":          vars.Seed,
+		"substitutions": rewired.Substitutions,
+		"warnings":      comfy.MergeWarnings(rewired.Warnings, comfy.Lint(template)),
+		"graph":         graph,
+	})
+}
+
+// handleAdoptWorkflow handles POST /api/comfy/adopt.
+//
+// A ComfyUI render carries the exact API-format graph that made it in its
+// `prompt` chunk. Handing one of those back is the shortest path from "I have a
+// workflow that works" to "the app uses it" -- no export step, no file picker,
+// no JSON.
+//
+// Nothing is saved. The graph comes back for review and the caller chooses a
+// family to store it against, because adopting the wrong image into the wrong
+// slot is easy and silently wrong.
+func (s *Server) handleAdoptWorkflow(w http.ResponseWriter, r *http.Request) {
+	if s.readOnlyGuard(w) {
+		return
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxUploadBytes))
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "upload too large", err.Error())
+		return
+	}
+	if !blobstore.IsImage(data) {
+		writeError(w, http.StatusUnsupportedMediaType, "not an image")
+		return
+	}
+
+	key, workflow, err := thumb.ExtractWorkflow(data)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "no workflow in this image",
+			"a ComfyUI render carries its graph in a PNG text chunk; this image has none")
+		return
+	}
+	// The `workflow` chunk is the editor format and cannot be queued; only
+	// `prompt` is the API form. Saying which one was found is the difference
+	// between a fixable mistake and a mystery.
+	if err := comfy.CheckAPIFormat(workflow); err != nil {
+		writeError(w, http.StatusBadRequest,
+			"this image carries the editor-format workflow, not the API format",
+			err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chunk":    key,
+		"workflow": json.RawMessage(workflow),
+		"warnings": comfy.Lint(workflow),
+	})
 }
 
 // handleListRenders handles GET /api/renders.
@@ -347,6 +486,79 @@ func (s *Server) handleComfyStatus(w http.ResponseWriter, r *http.Request) {
 	resp["reachable"] = true
 	resp["version"] = version
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// familyStatus is what the settings UI shows next to each family slot.
+type familyStatus struct {
+	Family string `json:"family"`
+
+	// Source is "file", "inline" or "default".
+	Source string `json:"source"`
+	File   string `json:"file,omitempty"`
+
+	Checkpoint string `json:"checkpoint,omitempty"`
+
+	OK       bool            `json:"ok"`
+	Error    string          `json:"error,omitempty"`
+	Warnings []comfy.Warning `json:"warnings,omitempty"`
+}
+
+// handleWorkflowStatus handles GET /api/comfy/status.
+//
+// Resolves every configured family the same way a render would and reports what
+// it found. This is the difference between discovering a missing file at 2am
+// when a render fails and seeing it in Settings the moment it is configured --
+// and a pointed-at file can go missing without anything in this app changing,
+// which is the cost of pointing at files rather than copying them.
+func (s *Server) handleWorkflowStatus(w http.ResponseWriter, r *http.Request) {
+	byFamily, fallback := s.workflowSettings()
+
+	families := []string{""}
+	families = append(families, basemodel.Known...)
+
+	out := []familyStatus{}
+	for _, family := range families {
+		slot, configured := byFamily[family]
+		if family == "" {
+			slot, configured = fallback, len(fallback) > 0
+		}
+
+		st := familyStatus{Family: family, Source: "default", Checkpoint: s.checkpointFor(family)}
+		if !configured {
+			// Not an error: an unconfigured family falls back, which is the
+			// designed behaviour rather than a gap.
+			st.OK = true
+			if family != "" {
+				st.Source = "inherited"
+			}
+			out = append(out, st)
+			continue
+		}
+
+		if looksLikePath(string(slot)) {
+			st.Source = "file"
+			st.File = strings.TrimSpace(string(slot))
+		} else {
+			st.Source = "inline"
+		}
+
+		graph, err := s.resolveSlot(slot)
+		if err != nil {
+			st.Error = err.Error()
+			out = append(out, st)
+			continue
+		}
+		st.OK = true
+		st.Warnings = comfy.Lint(graph)
+		for _, warn := range st.Warnings {
+			if warn.Code == "not_api_format" {
+				st.OK = false
+				st.Error = warn.Message
+			}
+		}
+		out = append(out, st)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"families": out})
 }
 
 // attachRendered stores a finished render as a manual preview.

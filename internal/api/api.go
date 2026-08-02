@@ -127,9 +127,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/models/{sha}/previews/{image}/workflow", s.handlePreviewWorkflow)
 	s.mux.HandleFunc("GET /api/generated", s.handleGeneratedImages)
 	s.mux.HandleFunc("POST /api/models/{sha}/previews/render", s.handleRenderPreview)
+	s.mux.HandleFunc("POST /api/models/{sha}/previews/render/plan", s.handleRenderPlan)
 	s.mux.HandleFunc("GET /api/renders", s.handleListRenders)
 	s.mux.HandleFunc("DELETE /api/renders/{id}", s.handleCancelRender)
 	s.mux.HandleFunc("GET /api/comfy", s.handleComfyStatus)
+	s.mux.HandleFunc("GET /api/comfy/workflows", s.handleListWorkflows)
+	s.mux.HandleFunc("GET /api/comfy/status", s.handleWorkflowStatus)
+	s.mux.HandleFunc("POST /api/comfy/adopt", s.handleAdoptWorkflow)
 
 	s.mux.HandleFunc("GET /api/models/{sha}/training", s.handleGetTraining)
 	s.mux.HandleFunc("PUT /api/models/{sha}/training", s.handlePutTraining)

@@ -119,6 +119,7 @@ mm project --target stability-matrix         # write sidecars back out
 | `detect` | Find installed SD tools and their model roots |
 | `reindex` | Rebuild the search index and re-resolve every record |
 | `thumbs` | Derive grid-sized copies of previews that lack one |
+| `comfy` | Check and plan ComfyUI workflows without rendering |
 | `report` | Distinct models, duplication, size distribution |
 | `verify` | Re-read files and check the index against the disk |
 | `bench` | Compare hashing throughput at different worker counts |

@@ -79,7 +79,11 @@ func Fill(template json.RawMessage, v Vars) (json.RawMessage, error) {
 		case "prompt":
 			return jsonInner(firstNonEmpty(v.Prompt, strings.Join(v.TriggerWords, ", "), v.Name))
 		case "negative":
-			return jsonInner(v.Negative)
+			// Falls back here rather than in Vars, so that an empty
+			// Vars.Negative means "the user did not ask for one" -- which is
+			// what stops rewiring from overwriting a template's own negative
+			// prompt with this generic one.
+			return jsonInner(firstNonEmpty(v.Negative, DefaultNegative))
 		case "seed":
 			// A bare number, because a seed lands in a numeric field. Quoting
 			// it would make ComfyUI reject the node.

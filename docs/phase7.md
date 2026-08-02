@@ -275,6 +275,53 @@ queue and is better placed to order it than this app is. Cancelling stops this
 daemon waiting; whatever ComfyUI already queued stays queued, since clearing
 someone else's queue is not this app's call.
 
+### You point at a workflow; the app rewires it
+
+A stock ComfyUI template hardcodes one model. Pointed at unchanged, every
+thumbnail in the library would be the same picture of whatever that template
+names — so the lora *must* be substituted.
+
+That substitution does not need hand-authored placeholders. At render time the
+app finds the lora loader, the checkpoint input, the sampler seed and the prompt
+nodes, and rewrites them on a copy. **The file on disk is never touched.**
+
+    lora        always      the point of the feature
+    seed        always      per model, else every thumbnail shares a composition
+    prompt      when known  the model's trigger words, or what you typed
+    negative    when given
+    checkpoint  when set    otherwise the workflow's own is kept
+
+The last two are deliberate. A stock template names a checkpoint and a negative
+prompt that evidently work, since the workflow works — overwriting them
+uninvited would break a graph that was fine.
+
+Prompts are **traced through the sampler's links**, following `positive` and
+`negative` to the node ids they name and through a `FluxGuidance`-style wrapper
+if there is one. "The first `CLIPTextEncode` is the positive one" is wrong about
+half the time, and a swapped pair is a thumbnail that is confidently wrong.
+
+Two things the rewrite pass must not do, both of which have tests: drop node
+fields it does not recognise (`_meta` today, something else tomorrow), and
+reformat numbers it did not touch — without `UseNumber`, a seed of
+`156680208700286` round-trips through float64 into `1.56680208700286e+14`,
+reaching ComfyUI as a float where a node wants an integer.
+
+Placeholders still work and win where present, so an author who wrote
+`"masterpiece, {{triggers}}"` keeps their wrapping. Which inputs are
+author-controlled is worked out by filling the template twice with different
+values and diffing — a template is not valid JSON before filling, since
+`"seed": {{seed}}` sits where a number belongs, so it cannot simply be parsed
+and scanned for braces.
+
+Full reference: [docs/comfyui-workflows.md](comfyui-workflows.md).
+
+### Three ways in
+
+Point at a file in ComfyUI's workflows folder (re-read every render, so edits
+there take effect with no re-pasting), adopt one from a rendered PNG's `prompt`
+chunk, or paste JSON. `mm comfy check` and `mm comfy plan` answer "is this
+usable" and "what exactly would be sent" without spending a second of GPU time.
+
 ### API format, not editor format
 
 ComfyUI accepts the *API* form of a graph. A PNG it exported carries both —

@@ -569,6 +569,7 @@ export const SETTING_COMFY_OUTPUT = 'thumbnails.comfy_output_dir'
 export const SETTING_COMFY_URL = 'thumbnails.comfy_url'
 export const SETTING_COMFY_WORKFLOW = 'thumbnails.comfy_workflow'
 export const SETTING_COMFY_CHECKPOINT = 'thumbnails.comfy_checkpoint'
+export const SETTING_COMFY_WORKFLOW_DIR = 'thumbnails.comfy_workflow_dir'
 
 // A (root path -> type -> subfolder) map. One type has three different folder
 // names across the three tools, so the mapping can only be per (root, type).
@@ -723,3 +724,84 @@ export const listRenders = () =>
 
 export const cancelRender = (id: string) =>
   request<{ status: string }>(`/api/renders/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+// --- workflows ------------------------------------------------------------------
+//
+// A family slot holds either a graph or the *name of a file* holding one.
+// Naming a file is the better of the two: the workflow stays where ComfyUI saved
+// it, stays editable there, and the next render picks the edit up.
+
+export interface WorkflowFile {
+  name: string
+  rel: string
+  // False for a graph saved from the canvas rather than with Save (API Format).
+  // Shown but unusable, because "my workflow isn't in the list" is a worse
+  // puzzle than "this one is the wrong format".
+  api_format: boolean
+  note?: string
+  warnings?: ComfyWarning[]
+}
+
+export interface ComfyWarning {
+  code: string
+  message: string
+}
+
+export interface FamilyStatus {
+  family: string
+  source: 'file' | 'inline' | 'default' | 'inherited'
+  file?: string
+  checkpoint?: string
+  ok: boolean
+  error?: string
+  warnings?: ComfyWarning[]
+}
+
+export const listWorkflows = () =>
+  request<{ dir: string; workflows: WorkflowFile[]; error?: string }>('/api/comfy/workflows')
+
+export const workflowStatus = () =>
+  request<{ families: FamilyStatus[] }>('/api/comfy/status').then((r) => r.families)
+
+export interface Substitution {
+  node: string
+  class: string
+  input: string
+  was: unknown
+  now: unknown
+}
+
+export interface RenderPlan {
+  base_model: string
+  source: string
+  model: string
+  checkpoint?: string
+  seed: number
+  substitutions: Substitution[]
+  warnings: ComfyWarning[]
+  graph: unknown
+}
+
+// Everything a render would do, minus the render. Spending someone else's GPU
+// for thirty seconds to find out the graph names the wrong lora is a bad way to
+// learn that.
+export const planRender = (sha: string, req: RenderRequest = {}) =>
+  request<RenderPlan>(`/api/models/${sha}/previews/render/plan`, {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
+
+// A ComfyUI render carries the graph that made it. Adopting one is the shortest
+// path from "I have a workflow that works" to "the app uses it".
+export async function adoptWorkflow(file: File | Blob): Promise<{
+  chunk: string
+  workflow: unknown
+  warnings: ComfyWarning[]
+}> {
+  const h: Record<string, string> = {}
+  if (config.token) h.Authorization = `Bearer ${config.token}`
+  const res = await fetch('/api/comfy/adopt', { method: 'POST', headers: h, body: file })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(body.detail || body.error || res.statusText)
+  return body
+}

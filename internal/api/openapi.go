@@ -291,6 +291,27 @@ func openAPISpec(version string) []byte {
 						"displace it.",
 					"Media", jsonResponse(object(nil)), pathParam("sha", "Model SHA256")),
 			},
+			"/api/comfy/workflows": get(
+				"Saved workflows in the configured folder, each flagged for whether "+
+					"it is the API format ComfyUI can queue", "Media", jsonResponse(object(nil))),
+			"/api/comfy/status": get(
+				"Per base-model family: which workflow is in use, where it came from, "+
+					"and anything wrong with it", "Media", jsonResponse(object(nil))),
+			"/api/comfy/adopt": map[string]any{
+				"post": operation(
+					"Extract the API-format graph a ComfyUI render carries in its PNG "+
+						"metadata. Saves nothing -- the caller reviews it and chooses a "+
+						"family to store it against.",
+					"Media", jsonResponse(object(nil))),
+			},
+			"/api/models/{sha}/previews/render/plan": map[string]any{
+				"post": operation(
+					"Everything a render would do, minus the render: the workflow "+
+						"chosen, every input that would be rewritten with its old and new "+
+						"value, and any warnings. Contacts nothing.",
+					"Media", jsonResponse(object(nil)), pathParam("sha", "Model SHA256")),
+			},
+
 			"/api/renders": get("Tracked renders, newest first", "Media",
 				jsonResponse(object(nil))),
 			"/api/renders/{id}": map[string]any{

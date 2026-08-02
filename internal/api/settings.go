@@ -24,6 +24,7 @@ func settingKeyAllowed(key string) bool {
 		store.SettingComfyOutputDir,
 		store.SettingComfyURL,
 		store.SettingComfyWorkflow,
+		store.SettingComfyWorkflowDir,
 		store.SettingComfyCheckpoint:
 		return true
 	}

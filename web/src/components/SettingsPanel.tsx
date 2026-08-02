@@ -19,10 +19,16 @@ import {
   SETTING_COMFY_OUTPUT,
   SETTING_COMFY_URL,
   SETTING_COMFY_WORKFLOW,
+  SETTING_COMFY_WORKFLOW_DIR,
   SETTING_DEFAULT_ROOT,
   SETTING_FOLDER_MAP,
+  adoptWorkflow,
   comfyStatus,
+  listWorkflows,
+  workflowStatus,
   type ComfyStatus,
+  type FamilyStatus,
+  type WorkflowFile,
   type FolderDefaults,
   type FolderMap,
   type Root,
@@ -96,6 +102,11 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
   const [workflows, setWorkflows] = useState<Record<string, string>>({})
   const [family, setFamily] = useState('')
   const [comfy, setComfy] = useState<ComfyStatus | null>(null)
+  const [workflowDir, setWorkflowDir] = useState('')
+  const [files, setFiles] = useState<WorkflowFile[]>([])
+  const [filesError, setFilesError] = useState<string | null>(null)
+  const [famStatus, setFamStatus] = useState<FamilyStatus[]>([])
+  const adoptInput = useRef<HTMLInputElement>(null)
   const [newPath, setNewPath] = useState('')
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
@@ -116,6 +127,7 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
         setFolderMap((s[SETTING_FOLDER_MAP] as FolderMap) ?? {})
         setDefaultRoot((s[SETTING_DEFAULT_ROOT] as string) ?? '')
         setComfyOut((s[SETTING_COMFY_OUTPUT] as string) ?? '')
+        setWorkflowDir((s[SETTING_COMFY_WORKFLOW_DIR] as string) ?? '')
         setComfyUrl((s[SETTING_COMFY_URL] as string) ?? '')
         // Both settings accept a bare value (meaning "for every family") or a
         // map. Normalized to a map here so the editor has one shape to deal
@@ -125,6 +137,7 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
       })
       .catch(() => {})
     comfyStatus().then(setComfy).catch(() => setComfy(null))
+    void refreshWorkflows()
     detectInstalls()
       .then((d) => setSuggestions(d.model_roots ?? []))
       .catch(() => {
@@ -159,6 +172,17 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
       clearInterval(timer)
     }
   }, [hidden, refresh, onLibraryChanged])
+
+  const refreshWorkflows = useCallback(async () => {
+    try {
+      const res = await listWorkflows()
+      setFiles(res.workflows)
+      setFilesError(res.error ?? null)
+    } catch (e) {
+      setFilesError((e as Error).message)
+    }
+    workflowStatus().then(setFamStatus).catch(() => {})
+  }, [])
 
   const run = async (fn: () => Promise<unknown>, ok?: string) => {
     setBusy(true)
@@ -466,6 +490,31 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
               : comfy.error || 'Configured, but nothing is answering.'}
         </p>
 
+        <label className="setting-row">
+          <span>Workflow folder</span>
+          <input
+            type="text"
+            placeholder="E:\\ComfyUI\\user\\default\\workflows"
+            value={workflowDir}
+            disabled={readOnly}
+            spellCheck={false}
+            onChange={(e) => setWorkflowDir(e.target.value)}
+            onBlur={() =>
+              run(async () => {
+                await (workflowDir.trim()
+                  ? putSetting(SETTING_COMFY_WORKFLOW_DIR, workflowDir.trim())
+                  : deleteSetting(SETTING_COMFY_WORKFLOW_DIR))
+                await refreshWorkflows()
+              })
+            }
+          />
+        </label>
+        <p className="hint">
+          Where ComfyUI saves workflows. Pointing a family at a file here keeps the
+          file yours: it is re-read on every render, so editing it in ComfyUI takes
+          effect with no re-pasting. Save with <em>Save (API Format)</em>.
+        </p>
+
         <p className="hint">
           A checkpoint and a workflow are kept <strong>per base model</strong>. An
           SDXL/Illustrious lora and a FLUX.2 one need different loaders, a different
@@ -501,32 +550,147 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
           />
         </label>
         <p className="hint">
-          A lora cannot render anything by itself, so a preview is generated on top of
-          a checkpoint. Name it exactly as ComfyUI lists it.
+          Leave this blank to keep whatever checkpoint the workflow already names —
+          it evidently works, since the workflow does. Set one only to override it,
+          named exactly as ComfyUI lists it.
         </p>
 
-        <details className="workflow-editor" open={Boolean(workflows[family])}>
-          <summary>Workflow for {family || 'everything else'}</summary>
-          <p className="hint">
-            ComfyUI&rsquo;s <strong>API format</strong>, not the editor format — in
-            ComfyUI, enable <em>Settings &rsaquo; Dev mode</em> and use{' '}
-            <em>Save (API Format)</em>. Placeholders:{' '}
-            {(comfy?.placeholders ?? []).map((p) => (
-              <code key={p}>{`{{${p}}}`}</code>
-            ))}
-            . Leave blank to fall back to the default slot, and leave that blank for
-            the built-in SDXL-shaped graph.
-          </p>
-          <textarea
-            rows={14}
-            spellCheck={false}
-            value={workflows[family] ?? ''}
-            disabled={readOnly}
-            placeholder={family === '' ? '(built-in default)' : '(use the default slot)'}
-            onChange={(e) => setWorkflows({ ...workflows, [family]: e.target.value })}
-            onBlur={() => saveMap(SETTING_COMFY_WORKFLOW, workflows, run)}
-          />
-        </details>
+        {(() => {
+          const status = famStatus.find((f) => f.family === family)
+          const value = workflows[family] ?? ''
+          const isFile = value.trim() !== '' && !value.trim().startsWith('{')
+          const mode = value.trim() === '' ? 'inherit' : isFile ? 'file' : 'inline'
+
+          return (
+            <div className="workflow-source">
+              <div className="chip-row">
+                {(
+                  [
+                    ['inherit', family === '' ? 'Built-in default' : 'Inherit default'],
+                    ['file', 'Pick a file'],
+                    ['inline', 'Paste JSON'],
+                  ] as const
+                ).map(([m, label]) => (
+                  <button
+                    key={m}
+                    className={`chip${mode === m ? ' on' : ''}`}
+                    disabled={readOnly}
+                    onClick={() => {
+                      const next = { ...workflows }
+                      if (m === 'inherit') delete next[family]
+                      else if (m === 'file') next[family] = files[0]?.rel ?? ''
+                      else next[family] = '{\n}'
+                      setWorkflows(next)
+                      if (m === 'inherit') saveMap(SETTING_COMFY_WORKFLOW, next, run)
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {mode === 'file' && (
+                <>
+                  <select
+                    value={value}
+                    disabled={readOnly}
+                    onChange={(e) => {
+                      const next = { ...workflows, [family]: e.target.value }
+                      setWorkflows(next)
+                      saveMap(SETTING_COMFY_WORKFLOW, next, run)
+                    }}
+                  >
+                    <option value="">(choose a workflow)</option>
+                    {files.map((f) => (
+                      <option key={f.rel} value={f.rel} disabled={!f.api_format}>
+                        {f.rel}
+                        {f.api_format ? '' : ' — not API format, re-save from ComfyUI'}
+                      </option>
+                    ))}
+                  </select>
+                  {filesError && <p className="hint error-text">{filesError}</p>}
+                  {!filesError && files.length === 0 && (
+                    <p className="hint">
+                      No workflows in that folder yet. In ComfyUI: enable{' '}
+                      <em>Settings &rsaquo; Dev mode</em>, open a template, and use{' '}
+                      <em>Save (API Format)</em>.
+                    </p>
+                  )}
+                </>
+              )}
+
+              {mode === 'inline' && (
+                <textarea
+                  rows={12}
+                  spellCheck={false}
+                  value={value}
+                  disabled={readOnly}
+                  onChange={(e) => setWorkflows({ ...workflows, [family]: e.target.value })}
+                  onBlur={() => saveMap(SETTING_COMFY_WORKFLOW, workflows, run)}
+                />
+              )}
+
+              <div className="workflow-actions">
+                <input
+                  ref={adoptInput}
+                  type="file"
+                  accept="image/*"
+                  hidden
+                  onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    e.target.value = ''
+                    if (!file) return
+                    void run(async () => {
+                      const res = await adoptWorkflow(file)
+                      const next = {
+                        ...workflows,
+                        [family]: JSON.stringify(res.workflow, null, 2),
+                      }
+                      setWorkflows(next)
+                      saveMap(SETTING_COMFY_WORKFLOW, next, run)
+                    }, 'Workflow adopted from the image.')
+                  }}
+                />
+                <button disabled={readOnly || busy} onClick={() => adoptInput.current?.click()}>
+                  Adopt from a rendered image
+                </button>
+                <button disabled={busy} onClick={() => void refreshWorkflows()}>
+                  Refresh
+                </button>
+              </div>
+
+              {status && (
+                <p className={`hint${status.ok ? '' : ' error-text'}`}>
+                  {status.error
+                    ? status.error
+                    : status.source === 'file'
+                      ? `Using ${status.file}`
+                      : status.source === 'inline'
+                        ? 'Using a pasted workflow'
+                        : family === ''
+                          ? 'Using the built-in SDXL-shaped graph'
+                          : 'Using the default slot'}
+                  {(status.warnings ?? []).map((warn) => (
+                    <span key={warn.code} className="warn-line">
+                      {warn.message}
+                    </span>
+                  ))}
+                </p>
+              )}
+            </div>
+          )
+        })()}
+
+        <p className="hint">
+          You do not need to edit the file. The lora, the seed and the prompt are
+          rewritten per model at render time, on a copy — see{' '}
+          <code>docs/comfyui-workflows.md</code>. Placeholders{' '}
+          {(comfy?.placeholders ?? []).slice(0, 3).map((p) => (
+            <code key={p}>{`{{${p}}}`}</code>
+          ))}
+          … are available when you want exact control instead.
+        </p>
+
       </section>
     </div>
   )

@@ -47,6 +47,12 @@ const (
 	// thumbnail, with {{placeholders}} filled per model.
 	SettingComfyWorkflow = "thumbnails.comfy_workflow"
 
+	// SettingComfyWorkflowDir is a directory of saved ComfyUI workflows to pick
+	// from, normally <ComfyUI>/user/default/workflows. Naming a file beats
+	// pasting JSON: the file stays editable in ComfyUI, and the next render
+	// picks the edit up.
+	SettingComfyWorkflowDir = "thumbnails.comfy_workflow_dir"
+
 	// SettingComfyCheckpoint is the base checkpoint a lora preview renders on.
 	// A lora cannot render anything by itself and this app cannot guess which
 	// checkpoint you have, so it is configured rather than inferred.

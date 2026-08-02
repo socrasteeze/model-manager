@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -268,15 +270,15 @@ func TestWorkflowIsChosenByBaseModelFamily(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := string(s.workflowTemplate(basemodel.Illustrious)); got != illustrious {
+	if got := mustTemplate(t, s, basemodel.Illustrious); got != illustrious {
 		t.Errorf("Illustrious got the wrong graph:\n%s", got)
 	}
-	if got := string(s.workflowTemplate(basemodel.Flux2)); got != flux2 {
+	if got := mustTemplate(t, s, basemodel.Flux2); got != flux2 {
 		t.Errorf("Flux.2 got the wrong graph:\n%s", got)
 	}
 	// A family with no slot configured falls to the default rather than to a
 	// graph belonging to a different architecture.
-	if got := string(s.workflowTemplate(basemodel.Anima)); got != fallback {
+	if got := mustTemplate(t, s, basemodel.Anima); got != fallback {
 		t.Errorf("Anima did not fall back to the default:\n%s", got)
 	}
 }
@@ -291,7 +293,7 @@ func TestABareWorkflowStringStillWorksAsTheDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, family := range []string{basemodel.Illustrious, basemodel.Flux2, ""} {
-		if got := string(s.workflowTemplate(family)); got != graph {
+		if got := mustTemplate(t, s, family); got != graph {
 			t.Errorf("family %q got %s", family, got)
 		}
 	}
@@ -307,8 +309,8 @@ func TestAGraphObjectIsNotMistakenForAFamilyMap(t *testing.T) {
 	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflow, graph); err != nil {
 		t.Fatal(err)
 	}
-	got := s.workflowTemplate(basemodel.Illustrious)
-	if !strings.Contains(string(got), "KSampler") {
+	got := mustTemplate(t, s, basemodel.Illustrious)
+	if !strings.Contains(got, "KSampler") {
 		t.Errorf("a directly-stored graph was lost: %s", got)
 	}
 }
@@ -342,4 +344,162 @@ func TestCheckpointIsChosenByFamily(t *testing.T) {
 	if got := s.checkpointFor(basemodel.Flux2); got != "one.safetensors" {
 		t.Errorf("bare checkpoint string = %q", got)
 	}
+}
+
+func mustTemplate(t *testing.T, s *Server, family string) string {
+	t.Helper()
+	wf, err := s.workflowTemplate(family)
+	if err != nil {
+		t.Fatalf("resolving the %q workflow: %v", family, err)
+	}
+	return string(wf)
+}
+
+// Pointing at a file rather than pasting JSON is the better of the two: the
+// workflow stays where ComfyUI saved it, stays editable there, and the next
+// render picks the edit up.
+func TestAFamilySlotCanNameAWorkflowFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flux2-preview.json")
+	graph := `{"1":{"class_type":"UNETLoader","inputs":{"unet_name":"{{checkpoint}}"}}}`
+	if err := os.WriteFile(path, []byte(graph), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := renderServer(t, "")
+	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflowDir, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflow, map[string]string{
+		basemodel.Flux2: "flux2-preview.json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := mustTemplate(t, s, basemodel.Flux2); got != graph {
+		t.Errorf("named file not loaded, got %s", got)
+	}
+
+	// Edited in ComfyUI, and the next render sees it -- the whole point of
+	// naming a file instead of copying its contents into the database.
+	edited := `{"1":{"class_type":"UNETLoader","inputs":{"unet_name":"edited"}}}`
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustTemplate(t, s, basemodel.Flux2); got != edited {
+		t.Errorf("an edit to the file was not picked up: %s", got)
+	}
+}
+
+// A stored relative name must not walk out of the workflow folder.
+func TestWorkflowNameCannotEscapeTheFolder(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "workflows")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s := renderServer(t, "")
+	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflowDir, dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"../secret.json", "../../secret.json"} {
+		got, err := s.resolveWorkflowPath(name)
+		if err == nil && !withinRoot(dir, got) {
+			t.Errorf("%q escaped the workflow folder: %q", name, got)
+		}
+	}
+}
+
+// A file that has gone missing must be reported where it is configured, not
+// discovered when a render fails at 2am. That is the cost of pointing at files
+// rather than copying them, and it is worth paying only if it is visible.
+func TestMissingWorkflowFileIsReportedInStatus(t *testing.T) {
+	dir := t.TempDir()
+	s := renderServer(t, "")
+	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflowDir, dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflow, map[string]string{
+		basemodel.Flux2: "gone.json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/comfy/status", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	var out struct {
+		Families []familyStatus `json:"families"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	var flux2 *familyStatus
+	for i := range out.Families {
+		if out.Families[i].Family == basemodel.Flux2 {
+			flux2 = &out.Families[i]
+		}
+	}
+	if flux2 == nil {
+		t.Fatal("Flux.2 missing from the status report")
+	}
+	if flux2.OK || flux2.Error == "" {
+		t.Errorf("a missing workflow file was reported as fine: %+v", flux2)
+	}
+	if flux2.Source != "file" || flux2.File != "gone.json" {
+		t.Errorf("status did not say which file: %+v", flux2)
+	}
+}
+
+// A graph that never loads the model renders the same picture for every model.
+// Worth saying out loud, but not worth refusing: previewing checkpoints is a
+// legitimate case with no separate model to load.
+func TestLintWarnsAboutAWorkflowThatIgnoresTheModel(t *testing.T) {
+	s := renderServer(t, "")
+	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflow, map[string]string{
+		basemodel.Anima: `{"1":{"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"x"}},` +
+			`"8":{"class_type":"SaveImage","inputs":{}}}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/api/comfy/status", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+
+	var out struct {
+		Families []familyStatus `json:"families"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	for _, f := range out.Families {
+		if f.Family != basemodel.Anima {
+			continue
+		}
+		if !f.OK {
+			t.Errorf("a usable workflow was rejected: %+v", f)
+		}
+		var codes []string
+		for _, w := range f.Warnings {
+			codes = append(codes, w.Code)
+		}
+		if !slicesContains(codes, comfy.WarnNoLoraInput) {
+			t.Errorf("no warning about ignoring the model: %v", codes)
+		}
+		return
+	}
+	t.Fatal("Anima missing from the status report")
+}
+
+func slicesContains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
