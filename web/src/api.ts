@@ -78,6 +78,15 @@ export interface PreviewImage {
   image_sha256: string
   mime: string
   bytes: number
+  width?: number
+  height?: number
+  source: string
+  position: number
+  // A small derived copy for the grid. Absent means the full image was already
+  // small enough to serve directly.
+  thumb_sha256?: string
+  // Present when the image was a ComfyUI render carrying its own graph.
+  workflow_sha256?: string
 }
 
 export interface TrainingRecord {
@@ -138,7 +147,11 @@ export interface Facets {
   origins: Record<string, number>
   formats: Record<string, number>
   tags: Record<string, number>
+  // How many models the current query matches.
   total: number
+  // How many models exist at all. Distinct from `total` because "nothing
+  // matches" and "there is nothing here yet" need different advice.
+  library_total: number
 }
 
 export interface Filters {
@@ -160,6 +173,21 @@ export const emptyFilters: Filters = {
   sort: 'name',
   order: 'asc',
 }
+
+// The canonical model types, mirroring internal/modeltype. Kept in step with
+// the server rather than invented here: this list drives the quick-filter chips
+// and the per-type folder settings, and a type the server does not know is a
+// filter that silently matches nothing.
+export const MODEL_TYPES = [
+  'checkpoint',
+  'lora',
+  'lycoris',
+  'embedding',
+  'vae',
+  'controlnet',
+  'upscaler',
+  'hypernetwork',
+] as const
 
 function headers(): HeadersInit {
   const h: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -341,7 +369,12 @@ export const isJobTerminalFailure = (j: DownloadJob) =>
 export interface StartDownload {
   url: string
   dest_root: string
+  // Left unset, the server picks the subfolder from (dest_root, type). Setting
+  // it overrides that -- the escape hatch, not the normal path.
   subdir?: string
+  // The provider's type string. Normalized server-side; anything unrecognised
+  // falls back to the root rather than becoming a directory name.
+  type?: string
   filename?: string
   sha256?: string
   size?: number
@@ -398,7 +431,21 @@ export const checkUpdates = () => request<UpdatesResults>('/api/updates')
 
 export const getModel = (sha: string) => request<ModelDetail>(`/api/models/${sha}`)
 export const getCandidates = (sha: string) => request<CandidateView[]>(`/api/models/${sha}/candidates`)
-export const getFacets = () => request<Facets>('/api/facets')
+// Facets take the same filters as the search, so the counts describe the
+// results rather than the whole library.
+export const getFacets = (filters?: Filters) => {
+  const params = new URLSearchParams()
+  if (filters) {
+    if (filters.q) params.set('q', filters.q)
+    for (const t of filters.type) params.append('type', t)
+    for (const b of filters.base_model) params.append('base_model', b)
+    for (const t of filters.tag) params.append('tag', t)
+    if (filters.present !== undefined) params.set('present', String(filters.present))
+    if (filters.needs_attention) params.set('needs_attention', 'true')
+  }
+  const qs = params.toString()
+  return request<Facets>(qs ? `/api/facets?${qs}` : '/api/facets')
+}
 export const getSuggestions = () => request<Suggestion[]>('/api/suggestions')
 
 export const updateModel = (sha: string, patch: Record<string, unknown>) =>
@@ -439,3 +486,167 @@ export function formatBytes(n: number): string {
   }
   return `${value.toFixed(value < 10 ? 2 : 1)} ${units[i]}`
 }
+
+// --- managed roots ------------------------------------------------------------
+//
+// A root is a directory the library indexes, and every root is also a legal
+// download destination -- which is why adding one is a server-side operation
+// with canonicalization and overlap checks, not a path the UI can invent.
+
+export interface Root {
+  id: number
+  path: string
+  label?: string
+  tool?: string
+  enabled: boolean
+  added_at: string
+  last_scanned_at?: string
+  files: number
+  bytes: number
+}
+
+export interface ScanJob {
+  id: string
+  roots: string[]
+  state: 'running' | 'complete' | 'failed' | 'cancelled'
+  started_at: string
+  finished_at?: string
+  files_total: number
+  files_done: number
+  files_hashed: number
+  files_cached: number
+  bytes_total: number
+  bytes_done: number
+  errors: number
+  error?: string
+}
+
+export const listRoots = () => request<{ roots: Root[] }>('/api/roots').then((r) => r.roots)
+
+export const addRoot = (path: string, label?: string, tool?: string) =>
+  request<{ root: Root; scan?: ScanJob; scan_deferred?: string }>('/api/roots', {
+    method: 'POST',
+    body: JSON.stringify({ path, label, tool }),
+  })
+
+export const patchRoot = (id: number, patch: { enabled?: boolean; label?: string; tool?: string }) =>
+  request<{ root: Root }>(`/api/roots/${id}`, { method: 'PATCH', body: JSON.stringify(patch) })
+
+export const removeRoot = (id: number) =>
+  request<{ status: string }>(`/api/roots/${id}`, { method: 'DELETE' })
+
+export const startScan = (roots?: string[]) =>
+  request<{ scan: ScanJob }>('/api/scans', {
+    method: 'POST',
+    body: JSON.stringify({ roots: roots ?? [] }),
+  })
+
+export const activeScan = () =>
+  request<{ scan: ScanJob | null }>('/api/scans/active').then((r) => r.scan)
+
+export const cancelScan = (id: string) =>
+  request<{ status: string }>(`/api/scans/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+export interface DetectedInstall {
+  Tool: string
+  Path: string
+  ModelRoots: string[]
+}
+
+export const detectInstalls = () =>
+  request<{ installs: DetectedInstall[]; model_roots: string[] }>('/api/detect')
+
+// --- settings -----------------------------------------------------------------
+//
+// Server-side, not localStorage: the same daemon serves the desktop and the
+// phone over the tailnet, and a view configured on one should be the view on
+// the other.
+
+export const SETTING_FILTERS = 'library.filters'
+export const SETTING_DEFAULT_ROOT = 'downloads.default_root'
+export const SETTING_FOLDER_MAP = 'downloads.folder_map'
+export const SETTING_COMFY_OUTPUT = 'thumbnails.comfy_output_dir'
+
+// A (root path -> type -> subfolder) map. One type has three different folder
+// names across the three tools, so the mapping can only be per (root, type).
+export type FolderMap = Record<string, Record<string, string>>
+
+export const getSettings = () =>
+  request<{ settings: Record<string, unknown> }>('/api/settings').then((r) => r.settings)
+
+export const putSetting = (key: string, value: unknown) =>
+  request<{ key: string; value: unknown }>(`/api/settings/${encodeURIComponent(key)}`, {
+    method: 'PUT',
+    body: JSON.stringify(value),
+  })
+
+export const deleteSetting = (key: string) =>
+  request<{ status: string }>(`/api/settings/${encodeURIComponent(key)}`, { method: 'DELETE' })
+
+export interface FolderDefaults {
+  types: string[]
+  tools: string[]
+  defaults: Record<string, Record<string, string>>
+}
+
+export const folderDefaults = () => request<FolderDefaults>('/api/downloads/folder-defaults')
+
+export interface ResolvedDestination {
+  root: string
+  subdir: string
+  dest_dir: string
+  type: string
+}
+
+// Where a download will actually land. Resolved by the server, because the
+// subfolder depends on which tool's vocabulary the root uses -- something the
+// browser has no way to know.
+export const resolveDestination = (root: string, type?: string) => {
+  const params = new URLSearchParams()
+  if (root) params.set('root', root)
+  if (type) params.set('type', type)
+  return request<ResolvedDestination>(`/api/downloads/destination?${params}`)
+}
+
+// --- previews -----------------------------------------------------------------
+
+export async function uploadPreview(sha: string, file: File | Blob): Promise<PreviewImage> {
+  // Raw body, not multipart: the server sniffs the bytes and ignores any
+  // declared type, so a form envelope would only add a layer to unwrap.
+  const h: Record<string, string> = {}
+  if (config.token) h.Authorization = `Bearer ${config.token}`
+  const res = await fetch(`/api/models/${sha}/previews`, { method: 'POST', headers: h, body: file })
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(body.detail || body.error || res.statusText)
+  return body.preview as PreviewImage
+}
+
+export const attachGeneratedPreview = (sha: string, rel: string) =>
+  request<{ preview: PreviewImage }>(`/api/models/${sha}/previews/generated`, {
+    method: 'POST',
+    body: JSON.stringify({ rel }),
+  }).then((r) => r.preview)
+
+export const deletePreview = (sha: string, imageSha: string) =>
+  request<void>(`/api/models/${sha}/previews/${imageSha}`, { method: 'DELETE' })
+
+export const reorderPreviews = (sha: string, order: string[]) =>
+  request<{ previews: PreviewImage[] }>(`/api/models/${sha}/previews/order`, {
+    method: 'PUT',
+    body: JSON.stringify({ order }),
+  }).then((r) => r.previews)
+
+export function workflowURL(sha: string, imageSha: string): string {
+  const base = `/api/models/${sha}/previews/${imageSha}/workflow`
+  return config.token ? `${base}?token=${encodeURIComponent(config.token)}` : base
+}
+
+export interface GeneratedImage {
+  name: string
+  rel: string
+  bytes: number
+  modified: string
+}
+
+export const listGenerated = (limit = 60) =>
+  request<{ dir: string; images: GeneratedImage[] }>(`/api/generated?limit=${limit}`)

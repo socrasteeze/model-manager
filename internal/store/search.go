@@ -65,15 +65,15 @@ type SearchResults struct {
 	Offset int         `json:"offset"`
 }
 
-// Search runs a query.
-func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
-	if q.Limit <= 0 {
-		q.Limit = 50
-	}
-	if q.Limit > 500 {
-		q.Limit = 500
-	}
-
+// filterSQL builds the WHERE clause shared by Search and FacetCounts.
+//
+// It is shared rather than duplicated because the two used to disagree: facet
+// counts were global while the result list was filtered, so the sidebar
+// promised 400 loras next to a list of 12. `skip` names a facet dimension to
+// leave unfiltered, which is what makes multi-select work -- once you pick
+// "lora", the type facet must still count the other types or there is no way to
+// add a second one.
+func filterSQL(q SearchQuery, skip string) (string, []any) {
 	where := []string{"1=1"}
 	args := []any{}
 
@@ -82,8 +82,8 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
 		args = append(args, buildFTSQuery(text))
 	}
 
-	addIn := func(column string, values []string) {
-		if len(values) == 0 {
+	addIn := func(dimension, column string, values []string) {
+		if len(values) == 0 || dimension == skip {
 			return
 		}
 		placeholders := make([]string, len(values))
@@ -93,12 +93,12 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
 		}
 		where = append(where, fmt.Sprintf("%s IN (%s)", column, strings.Join(placeholders, ",")))
 	}
-	addIn("r.type", q.Types)
-	addIn("r.base_model", q.BaseModels)
-	addIn("r.origin", q.Origins)
-	addIn("f.format", q.Formats)
+	addIn("types", "r.type", q.Types)
+	addIn("base_models", "r.base_model", q.BaseModels)
+	addIn("origins", "r.origin", q.Origins)
+	addIn("formats", "f.format", q.Formats)
 
-	if len(q.Tags) > 0 {
+	if len(q.Tags) > 0 && skip != "tags" {
 		// Every requested tag must be present, not any of them: narrowing is the
 		// point of adding a second tag.
 		placeholders := make([]string, len(q.Tags))
@@ -140,7 +140,19 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
         )`)
 	}
 
-	whereSQL := strings.Join(where, " AND ")
+	return strings.Join(where, " AND "), args
+}
+
+// Search runs a query.
+func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
+	if q.Limit <= 0 {
+		q.Limit = 50
+	}
+	if q.Limit > 500 {
+		q.Limit = 500
+	}
+
+	whereSQL, args := filterSQL(q, "")
 
 	var total int
 	countSQL := `SELECT COUNT(*) FROM model_file f
@@ -170,9 +182,11 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
         SELECT f.sha256, f.format, f.size,
                COALESCE(r.name, ''), COALESCE(r.type, ''), COALESCE(r.base_model, ''),
                COALESCE(r.version, ''), COALESCE(r.origin, ''), r.nsfw, r.trigger_words,
-               COALESCE((SELECT pi.image_sha256 FROM preview_image pi
+               COALESCE((SELECT COALESCE(NULLIF(pi.thumb_sha256, ''), pi.image_sha256)
+                           FROM preview_image pi
                           WHERE pi.sha256 = f.sha256
-                          ORDER BY pi.position, pi.id LIMIT 1), ''),
+                          ORDER BY (pi.source = 'manual') DESC, pi.position, pi.id
+                          LIMIT 1), ''),
                COALESCE((SELECT p.path FROM model_file_path p
                           WHERE p.sha256 = f.sha256
                           ORDER BY p.present DESC, p.id LIMIT 1), ''),
@@ -363,18 +377,35 @@ type Facets struct {
 	Origins    map[string]int `json:"origins"`
 	Formats    map[string]int `json:"formats"`
 	Tags       map[string]int `json:"tags"`
-	Total      int            `json:"total"`
+
+	// Total is how many models the current query matches.
+	Total int `json:"total"`
+
+	// LibraryTotal is how many models exist at all, ignoring every filter.
+	// Kept separate because the two answer different questions: "nothing
+	// matches" and "there is nothing here yet" need different advice, and once
+	// Total became filter-aware there was nothing left to tell them apart.
+	LibraryTotal int `json:"library_total"`
 }
 
-// FacetCounts summarizes what is in the library, for building filter UI.
-func (s *Store) FacetCounts() (*Facets, error) {
+// FacetCounts summarizes what the current query matches, for building filter UI.
+//
+// It takes the query. It used to take nothing, so the counts described the
+// whole library while the list beside them described a filtered subset -- a
+// sidebar that said "lora 412" next to twelve results. Each dimension is
+// counted with its own filter lifted, which is what lets a second value be
+// added to a facet that is already narrowing the search.
+func (s *Store) FacetCounts(q SearchQuery) (*Facets, error) {
 	f := &Facets{
 		Types: map[string]int{}, BaseModels: map[string]int{},
 		Origins: map[string]int{}, Formats: map[string]int{},
+		Tags: map[string]int{},
 	}
 
-	load := func(query string, dest map[string]int) error {
-		rows, err := s.db.Query(query)
+	load := func(dimension, expr, query string, dest map[string]int) error {
+		whereSQL, args := filterSQL(q, dimension)
+		sql := fmt.Sprintf(query, expr, whereSQL, expr)
+		rows, err := s.db.Query(sql, args...)
 		if err != nil {
 			return err
 		}
@@ -392,25 +423,66 @@ func (s *Store) FacetCounts() (*Facets, error) {
 		return rows.Err()
 	}
 
-	queries := map[string]map[string]int{
-		`SELECT COALESCE(type, ''), COUNT(*) FROM model_record GROUP BY type`:             f.Types,
-		`SELECT COALESCE(base_model, ''), COUNT(*) FROM model_record GROUP BY base_model`: f.BaseModels,
-		`SELECT COALESCE(origin, ''), COUNT(*) FROM model_record GROUP BY origin`:         f.Origins,
-		`SELECT format, COUNT(*) FROM model_file GROUP BY format`:                         f.Formats,
-	}
-	for q, dest := range queries {
-		if err := load(q, dest); err != nil {
-			return nil, fmt.Errorf("store: facet counts: %w", err)
+	// One shape for every scalar facet: count over the same joined set Search
+	// pages, so a facet count and a result count can never disagree about what
+	// a row is.
+	const scalarFacet = `
+        SELECT %s, COUNT(*)
+          FROM model_file f
+          LEFT JOIN model_record r ON r.sha256 = f.sha256
+         WHERE %s
+         GROUP BY %s`
+
+	for _, facet := range []struct {
+		dimension, expr string
+		dest            map[string]int
+	}{
+		{"types", "COALESCE(r.type, '')", f.Types},
+		{"base_models", "COALESCE(r.base_model, '')", f.BaseModels},
+		{"origins", "COALESCE(r.origin, '')", f.Origins},
+		{"formats", "f.format", f.Formats},
+	} {
+		if err := load(facet.dimension, facet.expr, scalarFacet, facet.dest); err != nil {
+			return nil, fmt.Errorf("store: facet counts (%s): %w", facet.dimension, err)
 		}
 	}
 
-	tags, err := s.AllTags()
+	// Tags need the join, so they get their own shape rather than being bent
+	// into the scalar one.
+	tagWhere, tagArgs := filterSQL(q, "tags")
+	tagRows, err := s.db.Query(`
+        SELECT t.name, COUNT(*)
+          FROM model_file f
+          LEFT JOIN model_record r ON r.sha256 = f.sha256
+          JOIN model_tag mt ON mt.sha256 = f.sha256
+          JOIN tag t ON t.id = mt.tag_id
+         WHERE `+tagWhere+`
+         GROUP BY t.id
+         ORDER BY t.name`, tagArgs...)
 	if err != nil {
+		return nil, fmt.Errorf("store: facet counts (tags): %w", err)
+	}
+	defer tagRows.Close()
+	for tagRows.Next() {
+		var name string
+		var n int
+		if err := tagRows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		f.Tags[name] = n
+	}
+	if err := tagRows.Err(); err != nil {
 		return nil, err
 	}
-	f.Tags = tags
 
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM model_file`).Scan(&f.Total); err != nil {
+	totalWhere, totalArgs := filterSQL(q, "")
+	if err := s.db.QueryRow(`
+        SELECT COUNT(*) FROM model_file f
+          LEFT JOIN model_record r ON r.sha256 = f.sha256
+         WHERE `+totalWhere, totalArgs...).Scan(&f.Total); err != nil {
+		return nil, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM model_file`).Scan(&f.LibraryTotal); err != nil {
 		return nil, err
 	}
 	return f, nil

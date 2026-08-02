@@ -380,4 +380,80 @@ CREATE TABLE extent_cache (
     PRIMARY KEY (device, inode, mtime_ns)
 ) STRICT;
 `,
+
+	// --- 4: managed roots and settings ---------------------------------------
+	//
+	// Until now the set of model roots was inferred from the data --
+	// SELECT DISTINCT root FROM model_file_path -- which cannot express a root
+	// that holds no models yet, cannot carry a label or a tool association, and
+	// disappears entirely if the last file under it goes away. Adding a
+	// directory from the UI needs all three, so the roots become a table.
+	//
+	// `path` holds the canonical spelling and is the authority. This matters
+	// beyond tidiness: SweepAbsentPaths matches `WHERE root = ?` exactly, so two
+	// spellings of one directory fork it and strand rows at present=1 forever.
+	`
+CREATE TABLE model_root (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    path            TEXT    NOT NULL UNIQUE,
+    label           TEXT    NOT NULL DEFAULT '',
+
+    -- The tool whose folder vocabulary this root uses ('stability-matrix',
+    -- 'swarmui', 'comfyui', or ''). Decides the default per-type subfolder for
+    -- downloads: one type has three different folder names across the three
+    -- tools, so the mapping can only be (root, type) -> subfolder.
+    tool            TEXT    NOT NULL DEFAULT '',
+
+    -- A disabled root is remembered but skipped by scans. Removing a root is
+    -- destructive to metadata association; disabling is the reversible option.
+    enabled         INTEGER NOT NULL DEFAULT 1,
+
+    added_at        TEXT    NOT NULL,
+    last_scanned_at TEXT
+) STRICT;
+
+-- Seed from what the library already knows, so an existing database keeps
+-- working with no user action. Roots recorded before this migration are
+-- already canonical: they were written by prepareRoots.
+INSERT INTO model_root (path, added_at)
+SELECT DISTINCT root, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+  FROM model_file_path
+ WHERE root <> '';
+
+-- Small JSON-valued key/value store for user preferences: saved library
+-- filters, the default download root, the per-(root,type) folder map. One kv
+-- table rather than a column per preference, so a new setting is a write and
+-- not a migration -- and preferences live server-side rather than in
+-- localStorage because the same daemon serves the phone over the tailnet, and
+-- a view you configured on the desktop should follow you there.
+CREATE TABLE setting (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+) STRICT;
+`,
+
+	// --- 5: user-supplied previews ------------------------------------------
+	//
+	// Two columns, both content addresses into the blob store.
+	//
+	// thumb_sha256 is a small derived copy served to the grid. A library of
+	// 19k models rendering full-size preview images is tens of gigabytes over
+	// the wire for a page of forty cards, and the phone on the tailnet is the
+	// client that pays for it.
+	//
+	// workflow_sha256 is the ComfyUI workflow JSON carried in a generated
+	// PNG's tEXt/iTXt chunk. Stored separately from the image so the workflow
+	// survives even if the image is later replaced, and so it can be handed
+	// back as a file to drop into ComfyUI.
+	`
+ALTER TABLE preview_image ADD COLUMN thumb_sha256 TEXT;
+ALTER TABLE preview_image ADD COLUMN workflow_sha256 TEXT;
+
+-- Manual previews sort ahead of fetched ones, the same tiering the field
+-- provenance already uses: a thumbnail you chose must not be displaced by the
+-- next enrichment run.
+CREATE INDEX idx_preview_rank
+    ON preview_image (sha256, source, position);
+`,
 }

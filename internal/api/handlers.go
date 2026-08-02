@@ -30,8 +30,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	q := store.SearchQuery{
+// searchQueryFrom reads a SearchQuery off the request. Shared by /api/models
+// and /api/facets so the two cannot drift into describing different sets.
+func searchQueryFrom(r *http.Request) store.SearchQuery {
+	return store.SearchQuery{
 		Text:           r.URL.Query().Get("q"),
 		Types:          queryList(r, "type"),
 		BaseModels:     queryList(r, "base_model"),
@@ -47,6 +49,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Limit:          queryInt(r, "limit", 50),
 		Offset:         queryInt(r, "offset", 0),
 	}
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := searchQueryFrom(r)
 
 	results, err := s.cfg.Store.Search(q)
 	if err != nil {
@@ -397,7 +403,9 @@ func (s *Server) handleDismissSuggestion(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleFacets(w http.ResponseWriter, r *http.Request) {
-	facets, err := s.cfg.Store.FacetCounts()
+	// Same query the model list is running, so the counts beside the results
+	// describe the results.
+	facets, err := s.cfg.Store.FacetCounts(searchQueryFrom(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "facets failed", err.Error())
 		return

@@ -15,6 +15,8 @@ import (
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/download"
 	"github.com/socrasteeze/model-manager/internal/origin"
+	"github.com/socrasteeze/model-manager/internal/scan"
+	"github.com/socrasteeze/model-manager/internal/scanjob"
 	"github.com/socrasteeze/model-manager/internal/webui"
 )
 
@@ -37,6 +39,7 @@ disk should not be reachable from a shared LAN without one.`)
 	tokenPath := fs_.String("token-file", "", "where to read/write the API token (default: alongside the database)")
 	noToken := fs_.Bool("no-token", false, "do not require a token even when bound off-loopback (unsafe)")
 	allowNetDB := fs_.Bool("allow-network-db", false, "permit a database on a network filesystem")
+	scanWorkers := fs_.Int("scan-workers", 1, "hashing workers per storage device for scans started from the UI")
 
 	var allowHosts rootList
 	fs_.Var(&allowHosts, "allow-host", "extra Host header to accept (repeatable)")
@@ -117,14 +120,30 @@ disk should not be reachable from a shared LAN without one.`)
 		downloads = mgr
 	}
 
+	// Scanning from the UI is a write, so it is offered only on a writable
+	// daemon -- same rule as downloading. A read-only server serves an index
+	// somebody else built and has no business rewriting it.
+	var scans *scanjob.Manager
+	if *writable {
+		scans = scanjob.New(st, scan.Options{
+			WorkersPerDevice: *scanWorkers,
+			// A scan started from the UI is nearly always a rescan of a library
+			// that is already indexed, which is exactly the case the sampled
+			// probe exists for: it turns a full re-read of an unchanged
+			// multi-gigabyte file into a sampled one.
+			UseProbe: true,
+		})
+	}
+
 	srv := api.New(api.Config{
-		Store:    st,
-		Blobs:    blobs,
-		UI:       embeddedUI(),
-		Security: sec,
-		Version:  version,
+		Store:     st,
+		Blobs:     blobs,
+		UI:        embeddedUI(),
+		Security:  sec,
+		Version:   version,
 		ReadOnly:  !*writable,
 		Origin:    originClient,
+		Scans:     scans,
 		Downloads: downloads,
 	})
 

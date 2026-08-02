@@ -29,6 +29,9 @@ func serverWithRoot(t *testing.T, root string, mutate func(*Config)) *Server {
 	}
 	t.Cleanup(func() { st.Close() })
 
+	if _, err := st.AddRoot(root, "", ""); err != nil {
+		t.Fatal(err)
+	}
 	run, _ := st.BeginScanRun(root)
 	if err := st.UpsertFileAndPath(
 		store.ModelFile{SHA256: "aaa", ProbeSHA256: "p", Size: 4096, Format: "safetensors"},

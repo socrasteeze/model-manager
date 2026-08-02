@@ -20,6 +20,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/download"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/scan"
+	"github.com/socrasteeze/model-manager/internal/scanjob"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
 
@@ -40,6 +41,11 @@ type Config struct {
 	// entirely, which is the default for a server that has no business writing
 	// new files onto the array.
 	Downloads *download.Manager
+
+	// Scans enables starting a scan from the UI. Nil leaves scanning to the
+	// CLI, which is the right default for a daemon that is only meant to serve
+	// an index somebody else built.
+	Scans *scanjob.Manager
 
 	// Origin enables remote browsing and update checking. Nil disables both
 	// endpoints: those are the only ones that make outbound requests, so an
@@ -101,6 +107,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/models/{sha}/fields/{field}", s.handleClearField)
 	s.mux.HandleFunc("GET /api/models/{sha}/candidates", s.handleCandidates)
 	s.mux.HandleFunc("PUT /api/models/{sha}/tags", s.handleSetTags)
+	s.mux.HandleFunc("POST /api/models/{sha}/previews", s.handleUploadPreview)
+	s.mux.HandleFunc("POST /api/models/{sha}/previews/generated", s.handleAttachGenerated)
+	s.mux.HandleFunc("PUT /api/models/{sha}/previews/order", s.handleReorderPreviews)
+	s.mux.HandleFunc("DELETE /api/models/{sha}/previews/{image}", s.handleDeletePreview)
+	s.mux.HandleFunc("GET /api/models/{sha}/previews/{image}/workflow", s.handlePreviewWorkflow)
+	s.mux.HandleFunc("GET /api/generated", s.handleGeneratedImages)
+
 	s.mux.HandleFunc("GET /api/models/{sha}/training", s.handleGetTraining)
 	s.mux.HandleFunc("PUT /api/models/{sha}/training", s.handlePutTraining)
 
@@ -116,11 +129,25 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/downloads", s.handleListDownloads)
 	s.mux.HandleFunc("DELETE /api/downloads/{id}", s.handleCancelDownload)
 	s.mux.HandleFunc("GET /api/downloads/roots", s.handleDownloadRoots)
+	s.mux.HandleFunc("GET /api/downloads/destination", s.handleResolveDestination)
+	s.mux.HandleFunc("GET /api/downloads/folder-defaults", s.handleFolderDefaults)
 
 	s.mux.HandleFunc("GET /api/facets", s.handleFacets)
 	s.mux.HandleFunc("GET /api/tags", s.handleTags)
 	s.mux.HandleFunc("GET /api/stats", s.handleStats)
+	s.mux.HandleFunc("GET /api/roots", s.handleListRoots)
+	s.mux.HandleFunc("POST /api/roots", s.handleAddRoot)
+	s.mux.HandleFunc("PATCH /api/roots/{id}", s.handlePatchRoot)
+	s.mux.HandleFunc("DELETE /api/roots/{id}", s.handleRemoveRoot)
+
+	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
+	s.mux.HandleFunc("PUT /api/settings/{key}", s.handlePutSetting)
+	s.mux.HandleFunc("DELETE /api/settings/{key}", s.handleDeleteSetting)
+
 	s.mux.HandleFunc("GET /api/scans", s.handleScans)
+	s.mux.HandleFunc("POST /api/scans", s.handleStartScan)
+	s.mux.HandleFunc("GET /api/scans/active", s.handleActiveScan)
+	s.mux.HandleFunc("DELETE /api/scans/{id}", s.handleCancelScan)
 	s.mux.HandleFunc("GET /api/detect", s.handleDetect)
 	s.mux.HandleFunc("GET /api/previews/{image}", s.handlePreview)
 	s.mux.HandleFunc("GET /openapi.json", s.handleOpenAPI)

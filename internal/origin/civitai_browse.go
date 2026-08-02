@@ -19,6 +19,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/socrasteeze/model-manager/internal/modeltype"
 )
 
 // CivitaiProvider searches Civitai.
@@ -41,12 +43,12 @@ type civitaiSearchResponse struct {
 }
 
 type civitaiSearchModel struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"`
-	NSFW bool   `json:"nsfw"`
-	Tags []string `json:"tags"`
-	Description string `json:"description"`
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	Type        string   `json:"type"`
+	NSFW        bool     `json:"nsfw"`
+	Tags        []string `json:"tags"`
+	Description string   `json:"description"`
 	Creator     struct {
 		Username string `json:"username"`
 	} `json:"creator"`
@@ -200,27 +202,14 @@ func civitaiType(t string) string {
 }
 
 // civitaiTypeToLocal is the inverse, for reading results back.
+//
+// An unrecognised Civitai type becomes "", not itself. That used to be
+// `strings.ToLower(t)`, which looked harmless while a type was only displayed
+// — but the type reaches the download path and decides a directory name, so
+// passing an unknown provider string through meant this app could be talked
+// into creating a folder named whatever Civitai invented next.
 func civitaiTypeToLocal(t string) string {
-	switch strings.ToLower(strings.TrimSpace(t)) {
-	case "lora":
-		return "lora"
-	case "locon", "lycoris", "dora":
-		return "lycoris"
-	case "checkpoint":
-		return "checkpoint"
-	case "textualinversion":
-		return "embedding"
-	case "controlnet":
-		return "controlnet"
-	case "vae":
-		return "vae"
-	case "upscaler":
-		return "upscaler"
-	case "hypernetwork":
-		return "hypernetwork"
-	default:
-		return strings.ToLower(t)
-	}
+	return modeltype.Normalize(t)
 }
 
 // civitaiBaseModels expands a normalized base-model name to the native labels
@@ -423,4 +412,3 @@ func looseString(v any) string {
 		return ""
 	}
 }
-

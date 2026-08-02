@@ -6,7 +6,6 @@ import {
   formatBytes,
   getCandidates,
   getModel,
-  previewURL,
   setTags,
   updateModel,
   type CandidateView,
@@ -14,6 +13,7 @@ import {
 } from '../api'
 import { CopyButton } from './CopyButton'
 import { EditableField } from './EditableField'
+import { PreviewEditor } from './PreviewEditor'
 
 interface Props {
   sha: string
@@ -104,13 +104,7 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
     <aside className="detail" ref={rootRef}>
       <button className="close" onClick={onClose} aria-label="Close">×</button>
 
-      {detail.previews.length > 0 && (
-        <div className="detail-previews">
-          {detail.previews.map((p) => (
-            <img key={p.id} src={previewURL(p.image_sha256)} alt="" loading="lazy" />
-          ))}
-        </div>
-      )}
+      <PreviewEditor sha={sha} previews={detail.previews} onChanged={() => { void load(); onChanged() }} />
 
       <h2>{title}</h2>
 

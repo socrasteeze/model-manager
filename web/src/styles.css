@@ -739,3 +739,448 @@ a.ghost {
   font-size: 0.75rem;
   white-space: nowrap;
 }
+
+/* --- Phase 7: type chips, settings, thumbnails ---------------------------- */
+
+/* One-click type visibility, sitting under the top bar. The sidebar keeps the
+   full facet lists; this is the filter reached often enough that opening a
+   panel for it is the wrong cost. */
+.type-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.55rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+  align-items: center;
+}
+
+.type-chips .chip {
+  background: var(--bg-sunken);
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 0.25rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.type-chips .chip:hover {
+  color: var(--text);
+}
+
+.type-chips .chip.on {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+/* A type with no models is dimmed rather than removed, so the row does not
+   reflow as the library fills up. */
+.type-chips .chip.faded {
+  opacity: 0.45;
+}
+
+.type-chips .chip-count {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Its own class rather than the sidebar's `.clear`, which is `width: 100%`.
+   Sharing it made this chip a full-width band that read as an error banner --
+   and because a 100%-wide item leaves no free space, `margin-left: auto` then
+   silently resolved to zero, so it was not even pushed right. */
+.type-chips .chip-clear {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--danger);
+}
+
+/* --- settings ------------------------------------------------------------- */
+
+.settings {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 1.4rem 1rem 4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.6rem;
+}
+
+.settings-block {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.2rem;
+}
+
+.settings-block h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1.05rem;
+}
+
+.settings .hint {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin: 0.3rem 0 0.8rem;
+}
+
+.notice {
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.8rem;
+  font-size: 0.9rem;
+}
+
+.root-add {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.root-add input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.45rem 0.7rem;
+  font-family: inherit;
+}
+
+.root-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+  margin-bottom: 0.8rem;
+}
+
+.root-suggestions .chip {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 0.2rem 0.65rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.root-suggestions .chip:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.root-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.root-list li {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.75rem;
+  background: var(--bg-sunken);
+}
+
+.root-list li.off {
+  opacity: 0.55;
+}
+
+.root-list li.empty-row {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  background: none;
+  border-style: dashed;
+}
+
+.root-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.5rem;
+}
+
+.root-path {
+  font-size: 0.9rem;
+  word-break: break-all;
+}
+
+.root-meta {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.root-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.root-actions button,
+.root-actions select,
+.root-footer button,
+.preview-actions button {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.28rem 0.65rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.root-actions button:hover:not(:disabled),
+.root-footer button:hover:not(:disabled),
+.preview-actions button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.root-actions button:disabled,
+.root-footer button:disabled,
+.preview-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.root-actions button.danger {
+  color: var(--danger);
+}
+
+.root-footer {
+  margin-top: 0.8rem;
+}
+
+.scan-progress {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-bottom: 0.8rem;
+}
+
+.scan-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-sunken);
+  border-radius: 999px;
+  overflow: hidden;
+  min-width: 120px;
+}
+
+.scan-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s linear;
+}
+
+.folder-editor {
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--border);
+}
+
+.folder-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.folder-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.folder-grid input,
+.setting-row input,
+.setting-row select {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.32rem 0.55rem;
+  font-family: inherit;
+  font-size: 0.85rem;
+}
+
+.folder-editor > button {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius);
+  padding: 0.28rem 0.65rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.setting-row > span {
+  font-size: 0.88rem;
+  min-width: 12rem;
+}
+
+.setting-row input {
+  flex: 1;
+  min-width: 14rem;
+}
+
+/* --- thumbnails ----------------------------------------------------------- */
+
+.preview-editor {
+  margin-bottom: 0.9rem;
+}
+
+.preview-strip {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding: 0.3rem;
+  border: 1px dashed transparent;
+  border-radius: var(--radius);
+}
+
+.preview-strip.drag-over {
+  border-color: var(--accent);
+  background: var(--bg-sunken);
+}
+
+.preview-strip figure {
+  margin: 0;
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.preview-strip img {
+  display: block;
+  height: 150px;
+  width: auto;
+  max-width: 260px;
+  object-fit: cover;
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+/* The chosen thumbnail is marked, because "which one is mine" is the whole
+   question this panel answers. */
+.preview-strip figure.chosen img {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.preview-strip figcaption {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  margin-top: 0.25rem;
+}
+
+.preview-strip figcaption .badge {
+  background: var(--accent-dim);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 0.05rem 0.45rem;
+}
+
+.preview-strip figcaption button {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0 0.15rem;
+}
+
+.preview-strip figcaption button:hover {
+  color: var(--text);
+}
+
+.preview-strip figcaption button.danger:hover {
+  color: var(--danger);
+}
+
+.preview-strip figcaption a {
+  color: var(--accent);
+}
+
+.preview-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.generated-picker {
+  margin-top: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.6rem;
+  background: var(--bg-sunken);
+}
+
+.generated-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.generated-item {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.25rem 0.6rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+  font-family: inherit;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generated-item:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.dest-hint {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.dest-hint code {
+  color: var(--text);
+  word-break: break-all;
+}
+
+.error-text {
+  color: var(--danger);
+}

@@ -17,7 +17,24 @@ type PreviewImage struct {
 	Source      string `json:"source"`
 	Position    int    `json:"position"`
 	CreatedAt   string `json:"created_at,omitempty"`
+
+	// ThumbSHA256 is a small derived copy for grid rendering. Empty means the
+	// full image is all there is.
+	ThumbSHA256 string `json:"thumb_sha256,omitempty"`
+
+	// WorkflowSHA256 addresses the ComfyUI workflow JSON extracted from the
+	// image, when it carried one.
+	WorkflowSHA256 string `json:"workflow_sha256,omitempty"`
 }
+
+// SourceManual marks a preview the user chose. It outranks every fetched
+// source, so enrichment can never displace a chosen thumbnail.
+const SourceManual = "manual"
+
+// previewOrder ranks manual previews first, then by position, then by
+// insertion. Written once here so the grid, the detail panel and the search
+// projection cannot disagree about which image is "the" thumbnail.
+const previewOrder = `ORDER BY (source = 'manual') DESC, position ASC, id ASC`
 
 // AddPreviewImage attaches an image to a model.
 //
@@ -38,16 +55,23 @@ func (s *Store) AddPreviewImage(p PreviewImage) error {
 
 	_, err := s.db.Exec(`
         INSERT INTO preview_image (
-            sha256, image_sha256, mime, bytes, width, height, source, position, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            sha256, image_sha256, mime, bytes, width, height, source, position,
+            created_at, thumb_sha256, workflow_sha256
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(sha256, image_sha256) DO UPDATE SET
             mime     = excluded.mime,
             bytes    = excluded.bytes,
             width    = COALESCE(excluded.width, preview_image.width),
             height   = COALESCE(excluded.height, preview_image.height),
-            position = MIN(preview_image.position, excluded.position)`,
+            position = MIN(preview_image.position, excluded.position),
+            thumb_sha256 = COALESCE(excluded.thumb_sha256, preview_image.thumb_sha256),
+            workflow_sha256 = COALESCE(excluded.workflow_sha256, preview_image.workflow_sha256),
+            -- Once manual, always manual: re-ingesting the same bytes from a
+            -- provider must not demote an image the user chose.
+            source = CASE WHEN preview_image.source = 'manual'
+                          THEN preview_image.source ELSE excluded.source END`,
 		p.SHA256, p.ImageSHA256, p.MIME, p.Bytes, width, height,
-		p.Source, p.Position, nowUTC())
+		p.Source, p.Position, nowUTC(), nullString(p.ThumbSHA256), nullString(p.WorkflowSHA256))
 	if err != nil {
 		return fmt.Errorf("store: attaching preview to %s: %w", p.SHA256, err)
 	}
@@ -58,9 +82,10 @@ func (s *Store) AddPreviewImage(p PreviewImage) error {
 func (s *Store) PreviewImages(sha string) ([]PreviewImage, error) {
 	rows, err := s.db.Query(`
         SELECT id, sha256, image_sha256, mime, bytes,
-               COALESCE(width, 0), COALESCE(height, 0), source, position, created_at
+               COALESCE(width, 0), COALESCE(height, 0), source, position, created_at,
+               COALESCE(thumb_sha256, ''), COALESCE(workflow_sha256, '')
           FROM preview_image WHERE sha256 = ?
-         ORDER BY position ASC, id ASC`, sha)
+         `+previewOrder, sha)
 	if err != nil {
 		return nil, fmt.Errorf("store: listing previews for %s: %w", sha, err)
 	}
@@ -70,7 +95,8 @@ func (s *Store) PreviewImages(sha string) ([]PreviewImage, error) {
 	for rows.Next() {
 		var p PreviewImage
 		if err := rows.Scan(&p.ID, &p.SHA256, &p.ImageSHA256, &p.MIME, &p.Bytes,
-			&p.Width, &p.Height, &p.Source, &p.Position, &p.CreatedAt); err != nil {
+			&p.Width, &p.Height, &p.Source, &p.Position, &p.CreatedAt,
+			&p.ThumbSHA256, &p.WorkflowSHA256); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -171,4 +197,140 @@ func (s *Store) AllTags() (map[string]int, error) {
 		out[name] = n
 	}
 	return out, rows.Err()
+}
+
+// nullString maps an empty string to SQL NULL, so COALESCE-based upserts treat
+// "not supplied" and "explicitly blank" the same way: keep what is there.
+func nullString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// RemovePreviewImage detaches one image from a model.
+//
+// The blob itself is left alone. Blobs are content-addressed and may be shared
+// by several models, so deleting bytes on a detach would silently blank another
+// model's thumbnail.
+func (s *Store) RemovePreviewImage(sha, imageSHA string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	res, err := s.db.Exec(
+		`DELETE FROM preview_image WHERE sha256 = ? AND image_sha256 = ?`, sha, imageSHA)
+	if err != nil {
+		return fmt.Errorf("store: removing preview from %s: %w", sha, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("store: %s has no preview %s", sha, imageSHA)
+	}
+	return nil
+}
+
+// ReorderPreviewImages sets display order from a list of image hashes.
+//
+// Images not named keep their relative order after the named ones. Manual
+// previews still sort ahead of fetched ones -- ordering within a tier is the
+// user's to choose, the tiering is not.
+func (s *Store) ReorderPreviewImages(sha string, imageSHAs []string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Push everything past the end first, so a partial list cannot collide with
+	// positions it has not reassigned yet.
+	if _, err := tx.Exec(
+		`UPDATE preview_image SET position = position + ? WHERE sha256 = ?`,
+		len(imageSHAs)+1, sha); err != nil {
+		return err
+	}
+	for i, img := range imageSHAs {
+		if _, err := tx.Exec(
+			`UPDATE preview_image SET position = ? WHERE sha256 = ? AND image_sha256 = ?`,
+			i, sha, img); err != nil {
+			return fmt.Errorf("store: reordering preview %s: %w", img, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// PreviewByImage looks up one attachment.
+func (s *Store) PreviewByImage(sha, imageSHA string) (*PreviewImage, error) {
+	images, err := s.PreviewImages(sha)
+	if err != nil {
+		return nil, err
+	}
+	for i := range images {
+		if images[i].ImageSHA256 == imageSHA {
+			return &images[i], nil
+		}
+	}
+	return nil, fmt.Errorf("store: %s has no preview %s", sha, imageSHA)
+}
+
+// PreviewsWithoutThumbnails lists previews that have no derived grid copy.
+//
+// The backfill query for `mm thumbs`. Ordered by size descending, so an
+// interrupted run has already dealt with the images that cost the most to send.
+func (s *Store) PreviewsWithoutThumbnails(limit int) ([]PreviewImage, error) {
+	query := `
+        SELECT id, sha256, image_sha256, mime, bytes,
+               COALESCE(width, 0), COALESCE(height, 0), source, position, created_at,
+               COALESCE(thumb_sha256, ''), COALESCE(workflow_sha256, '')
+          FROM preview_image
+         WHERE thumb_sha256 IS NULL OR thumb_sha256 = ''
+         ORDER BY bytes DESC, id ASC`
+	args := []any{}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing previews without thumbnails: %w", err)
+	}
+	defer rows.Close()
+
+	out := []PreviewImage{}
+	for rows.Next() {
+		var p PreviewImage
+		if err := rows.Scan(&p.ID, &p.SHA256, &p.ImageSHA256, &p.MIME, &p.Bytes,
+			&p.Width, &p.Height, &p.Source, &p.Position, &p.CreatedAt,
+			&p.ThumbSHA256, &p.WorkflowSHA256); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// SetPreviewThumbnail records a derived grid copy against a preview.
+func (s *Store) SetPreviewThumbnail(sha, imageSHA, thumbSHA string, width, height int) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	var w, h any
+	if width > 0 {
+		w = width
+	}
+	if height > 0 {
+		h = height
+	}
+	_, err := s.db.Exec(`
+        UPDATE preview_image
+           SET thumb_sha256 = ?,
+               width  = COALESCE(?, width),
+               height = COALESCE(?, height)
+         WHERE sha256 = ? AND image_sha256 = ?`,
+		thumbSHA, w, h, sha, imageSHA)
+	if err != nil {
+		return fmt.Errorf("store: recording thumbnail for %s: %w", imageSHA, err)
+	}
+	return nil
 }

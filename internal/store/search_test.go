@@ -372,7 +372,7 @@ func TestReindexSearchRebuildsEverything(t *testing.T) {
 
 func TestFacetCounts(t *testing.T) {
 	s := library(t)
-	f, err := s.FacetCounts()
+	f, err := s.FacetCounts(SearchQuery{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,5 +425,34 @@ func TestFilenameOfHandlesBothSeparators(t *testing.T) {
 		if got := filenameOf(in); got != want {
 			t.Errorf("filenameOf(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Counts must describe the result set, not the library. They used to describe
+// the library while the list beside them was filtered, so the sidebar could say
+// "SDXL 3" next to a single Flux result.
+func TestFacetCountsFollowTheQuery(t *testing.T) {
+	s := library(t)
+
+	f, err := s.FacetCounts(SearchQuery{BaseModels: []string{"Flux"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Total != 1 {
+		t.Errorf("total = %d under a Flux filter, want 1", f.Total)
+	}
+	// Only the one Flux model is counted by type, not all four in the library.
+	total := 0
+	for _, n := range f.Types {
+		total += n
+	}
+	if total != 1 {
+		t.Errorf("type counts ignored the base-model filter: %v", f.Types)
+	}
+
+	// A facet does not filter itself, or a second value could never be added
+	// to a filter already in force.
+	if f.BaseModels["SDXL"] != 3 {
+		t.Errorf("base-model facet filtered itself: %v", f.BaseModels)
 	}
 }

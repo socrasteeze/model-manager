@@ -212,6 +212,76 @@ func openAPISpec(version string) []byte {
 			"/api/detect": get("Detected SD tool installations and their model roots", "Discovery",
 				jsonResponse(object(nil))),
 
+			// Managed roots. Every root is also a legal download destination,
+			// so adding one is the operation that widens where this daemon may
+			// write -- guarded like the download endpoint, and refused outright
+			// when it would overlap a root already managed.
+			"/api/roots": map[string]any{
+				"get": operation("Managed model directories with file counts", "Roots",
+					jsonResponse(object(nil))),
+				"post": operation("Add a directory (canonicalized; overlap refused)", "Roots",
+					jsonResponse(object(nil))),
+			},
+			"/api/roots/{id}": map[string]any{
+				"patch": operation("Enable, disable, label or set the folder layout", "Roots",
+					jsonResponse(object(nil)), pathParam("id", "Root id")),
+				"delete": operation(
+					"Forget a directory. Nothing on disk is touched: the paths are marked "+
+						"absent and the model records and metadata are kept, so re-adding "+
+						"the folder restores the library.",
+					"Roots", jsonResponse(object(nil)), pathParam("id", "Root id")),
+			},
+			"/api/scans/active": get("Progress of the running or most recent scan", "Roots",
+				jsonResponse(object(nil))),
+			"/api/scans/{id}": map[string]any{
+				"delete": operation("Cancel the running scan", "Roots",
+					jsonResponse(object(nil)), pathParam("id", "Scan id")),
+			},
+
+			"/api/settings": get("Every stored preference", "Settings",
+				jsonResponse(object(nil))),
+			"/api/settings/{key}": map[string]any{
+				"put": operation("Store a preference (JSON value)", "Settings",
+					jsonResponse(object(nil)), pathParam("key", "Setting key")),
+				"delete": operation("Reset a preference to its built-in default", "Settings",
+					jsonResponse(object(nil)), pathParam("key", "Setting key")),
+			},
+
+			"/api/downloads/destination": get(
+				"Where a download of this type would land under this root. Resolved "+
+					"server-side because the subfolder depends on which tool's vocabulary "+
+					"the root uses -- the same lora is Lora under Stability Matrix and "+
+					"loras under ComfyUI.",
+				"Downloads", jsonResponse(object(nil)),
+				queryParam("root", "Destination root (defaults to the configured one)"),
+				queryParam("type", "Model type as the provider spells it")),
+			"/api/downloads/folder-defaults": get(
+				"Built-in per-tool folder vocabularies", "Downloads", jsonResponse(object(nil))),
+
+			"/api/generated": get(
+				"Recent images under the configured ComfyUI output folder", "Media",
+				jsonResponse(object(nil)), queryParam("limit", "Maximum returned")),
+
+			"/api/models/{sha}/previews": map[string]any{
+				"post": operation(
+					"Attach an image as this model's thumbnail. The body is raw image "+
+						"bytes; the type is sniffed rather than taken from a header. Stored "+
+						"with a manual source, which outranks every fetched preview, so "+
+						"enrichment can never displace a chosen thumbnail.",
+					"Media", jsonResponse(object(nil)), pathParam("sha", "Model SHA256")),
+			},
+			"/api/models/{sha}/previews/{image}": map[string]any{
+				"delete": operation(
+					"Detach an image. The blob is kept: blobs are content-addressed and "+
+						"shared, so deleting the bytes would blank other models too.",
+					"Media", emptyResponse(),
+					pathParam("sha", "Model SHA256"), pathParam("image", "Image SHA256")),
+			},
+			"/api/models/{sha}/previews/{image}/workflow": get(
+				"The ComfyUI workflow JSON this image carried, as a download", "Media",
+				jsonResponse(object(nil)),
+				pathParam("sha", "Model SHA256"), pathParam("image", "Image SHA256")),
+
 			"/api/previews/{image}": get("Fetch a preview image by content address", "Media",
 				map[string]any{
 					"200": map[string]any{

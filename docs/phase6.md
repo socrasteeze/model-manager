@@ -138,6 +138,7 @@ deployment the token exists for.
     GET    /api/downloads
     DELETE /api/downloads/{id}     -> cancels in flight, forgets when terminal
     GET    /api/downloads/roots
+    GET    /api/downloads/destination?root=&type=
 
 These are the only endpoints that make outbound requests. `mm serve --no-remote`
 disables all three, which is how an operator keeps the daemon from talking to
@@ -172,12 +173,20 @@ primitive for "fetch an arbitrary URL and write it anywhere on this filesystem"
 2. **The source host must be a known provider.** A URL is not accepted merely
    for being well-formed. Matching is by domain suffix, so `civitai.com` passes
    and `civitai.com.attacker.net` does not.
-3. **The destination must already be a scanned model root.** It is never
+3. **The destination must already be a managed model root.** It is never
    inferred from the URL, the filename, or a default. The server publishes the
    legal roots at `/api/downloads/roots` and the client picks one; anything
    else is refused. A requested subdirectory has traversal segments stripped,
    and containment is re-checked after symlink resolution, so a subdirectory
    that is a symlink out of the tree cannot be used to escape.
+
+Phase 7 moved the *subfolder* decision to the server as well. The browser used
+to pluralize the provider's type string into `${type}s` and send it — which
+fabricated directory names from unvalidated input and assumed one folder
+vocabulary when the three tools in use have three. The subfolder now comes from
+(root, type) server-side, and `/api/downloads/destination` reports the resolved
+path so the UI can show where a file will land before it is fetched. See
+[phase7](phase7.md).
 
 The standing guarantee still holds: nothing existing is modified. A download
 landing on a name already taken is given a new name rather than replacing what
@@ -254,4 +263,4 @@ Owned results deliberately do not get a download command.
 - Update checking covers Civitai only. HuggingFace repos have no version
   identity, so "newer" would have to mean `lastModified` moving, which is a
   weaker claim than a version id changing.
-- CivArchive endpoints need one live confirmation run (see above).
+- CivArchive field shapes are still being learned (see above).

@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  MODEL_TYPES,
+  SETTING_FILTERS,
   config,
+  deleteSetting,
   emptyFilters,
   getFacets,
+  getSettings,
+  putSetting,
   searchModels,
   type Facets,
   type Filters,
@@ -12,6 +17,7 @@ import { BrowsePanel } from './components/BrowsePanel'
 import { FilterPanel } from './components/FilterPanel'
 import { ModelCard } from './components/ModelCard'
 import { ModelDetailPanel } from './components/ModelDetailPanel'
+import { SettingsPanel } from './components/SettingsPanel'
 
 const PAGE_SIZE = 60
 
@@ -30,7 +36,35 @@ export function App() {
   // Library and Browse are separate modes rather than one blended result list:
   // one is an inventory of what is here, the other is a catalogue of what is
   // not, and merging them would make "have" ambiguous.
-  const [tab, setTab] = useState<'library' | 'browse'>('library')
+  const [tab, setTab] = useState<'library' | 'browse' | 'settings'>('library')
+
+  // Saved filters live on the server, not in localStorage: the same daemon
+  // answers the desktop and the phone over the tailnet, so a view configured on
+  // one should be the view on the other. Loaded once; until it lands, the
+  // default filters are used rather than blocking the first search.
+  const [filtersLoaded, setFiltersLoaded] = useState(false)
+  useEffect(() => {
+    getSettings()
+      .then((s) => {
+        const saved = s[SETTING_FILTERS] as Partial<Filters> | undefined
+        if (saved) setFilters((f) => ({ ...f, ...saved, q: f.q }))
+      })
+      .catch(() => {
+        /* a preference that will not load is not a reason to show nothing */
+      })
+      .finally(() => setFiltersLoaded(true))
+  }, [])
+
+  // Persist after the load has settled, so the initial default state cannot
+  // race ahead and overwrite what was saved.
+  useEffect(() => {
+    if (!filtersLoaded || config.readOnly) return
+    const { q: _q, ...persistable } = filters
+    const timer = setTimeout(() => {
+      void putSetting(SETTING_FILTERS, persistable).catch(() => {})
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [filters, filtersLoaded])
 
   // Debounce the text box rather than the whole filter object: clicking a facet
   // should feel instant, while typing should not fire a request per keystroke.
@@ -39,11 +73,14 @@ export function App() {
     return () => clearTimeout(timer)
   }, [query])
 
+  // Counts follow the query. They used to be fetched once on mount with no
+  // filters at all, so the sidebar could promise 412 loras beside twelve
+  // results.
   const loadFacets = useCallback(() => {
-    getFacets().then(setFacets).catch(() => {
+    getFacets(filters).then(setFacets).catch(() => {
       /* facets are a convenience; their absence must not break search */
     })
-  }, [])
+  }, [filters])
 
   useEffect(loadFacets, [loadFacets])
 
@@ -117,6 +154,9 @@ export function App() {
           <button className={tab === 'browse' ? 'on' : ''} onClick={() => setTab('browse')}>
             Browse
           </button>
+          <button className={tab === 'settings' ? 'on' : ''} onClick={() => setTab('settings')}>
+            Settings
+          </button>
         </nav>
 
         {tab === 'library' && (
@@ -142,6 +182,51 @@ export function App() {
         )}
       </header>
 
+      {/* One-click type visibility. The sidebar still holds the full facet
+          lists; this is the filter reached often enough that opening a panel
+          for it is the wrong cost. A type with no models is dimmed rather than
+          hidden, so the row does not reflow as the library fills up. */}
+      {tab === 'library' && (
+        <div className="type-chips">
+          <button
+            className={filters.type.length === 0 ? 'chip on' : 'chip'}
+            onClick={() => setFilters({ ...filters, type: [] })}
+          >
+            All
+          </button>
+          {MODEL_TYPES.map((t) => {
+            const count = facets?.types?.[t] ?? 0
+            const on = filters.type.includes(t)
+            return (
+              <button
+                key={t}
+                className={`chip${on ? ' on' : ''}${count === 0 && !on ? ' faded' : ''}`}
+                onClick={() =>
+                  setFilters({
+                    ...filters,
+                    type: on ? filters.type.filter((x) => x !== t) : [...filters.type, t],
+                  })
+                }
+              >
+                {t}
+                {count > 0 && <span className="chip-count">{count.toLocaleString()}</span>}
+              </button>
+            )
+          })}
+          {activeFilterCount > 0 && (
+            <button
+              className="chip chip-clear"
+              onClick={() => {
+                setFilters({ ...emptyFilters, q: filters.q, sort: filters.sort, order: filters.order })
+                if (!config.readOnly) void deleteSetting(SETTING_FILTERS).catch(() => {})
+              }}
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+      )}
+
       {config.readOnly && (
         <div className="banner">
           Read-only. Start the daemon with <code>--writable</code> to edit metadata.
@@ -153,6 +238,14 @@ export function App() {
           Library-Browse round trip, and lose results, destination choice and
           the visible download queue mid-transfer. */}
       <BrowsePanel hidden={tab !== 'browse'} />
+
+      <SettingsPanel
+        hidden={tab !== 'settings'}
+        onLibraryChanged={() => {
+          runSearch(0, false)
+          loadFacets()
+        }}
+      />
 
       <div className="body" hidden={tab !== 'library'}>
         <aside className={`sidebar${filtersOpen ? ' open' : ''}`}>
@@ -199,7 +292,7 @@ export function App() {
           {!loading && !error && hits.length === 0 && (
             <div className="empty">
               <p>Nothing matches.</p>
-              {total === 0 && facets?.total === 0 ? (
+              {facets?.library_total === 0 ? (
                 <p className="hint">
                   The index is empty. Run <code>mm scan --root /path/to/models</code>, then{' '}
                   <code>mm interpret</code>.

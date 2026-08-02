@@ -17,9 +17,11 @@ import {
   type DownloadJob,
   type Listing,
   type RemoteFile,
+  MODEL_TYPES,
   type Update,
 } from '../api'
 import { CopyButton } from './CopyButton'
+import { DestinationHint } from './DestinationHint'
 
 const PROVIDERS = [
   { id: 'civitai', label: 'Civitai' },
@@ -27,7 +29,10 @@ const PROVIDERS = [
   { id: 'huggingface', label: 'HuggingFace' },
 ]
 
-const TYPES = ['lora', 'checkpoint', 'lycoris', 'embedding', 'controlnet', 'vae']
+// The canonical set, from the server. It used to be a shorter hand-written
+// list here, and this same string decided a directory name -- so a type the
+// server did not recognise became a folder named after it.
+const TYPES = MODEL_TYPES
 
 export function BrowsePanel({ hidden }: { hidden?: boolean }) {
   const [query, setQuery] = useState<BrowseQuery>(emptyBrowseQuery)
@@ -211,6 +216,9 @@ export function BrowsePanel({ hidden }: { hidden?: boolean }) {
               ))}
             </select>
           </label>
+          {/* The per-type subfolder is resolved server-side, so the first
+              search result's type is what the hint previews. */}
+          <DestinationHint root={destRoot} type={results?.items[0]?.type} />
           {jobs.length > 0 && <DownloadQueue jobs={jobs} />}
         </div>
       ) : (
@@ -286,7 +294,11 @@ function ListingCard({
       const res = await startDownload({
         url: file.download_url,
         dest_root: destRoot,
-        subdir: listing.type ? `${listing.type}s` : undefined,
+        // No subdir: the server decides it from (root, type). The browser used
+        // to pluralize the provider's type string into `${type}s`, which
+        // produced `vaes/` and `lycoriss/` and assumed one folder vocabulary
+        // when the three tools on this machine use three.
+        type: listing.type,
         filename: file.name,
         sha256: file.sha256,
         size: file.size_bytes,

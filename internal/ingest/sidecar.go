@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/socrasteeze/model-manager/internal/modeltype"
 	"github.com/socrasteeze/model-manager/internal/provenance"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
@@ -395,24 +396,13 @@ func hasField(p Parsed, field string) bool {
 // normalizeType maps each tool's vocabulary onto this app's. An unrecognized
 // value is dropped rather than passed through, so the type facet stays a closed
 // set that a filter can rely on.
+// normalizeType maps a tool's spelling of a model type onto the canonical set.
+//
+// The closed-set contract lives in internal/modeltype now: one vocabulary for
+// the whole app, because the same string that labels a card also decides which
+// directory a download lands in.
 func normalizeType(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "lora", "loras":
-		return "lora"
-	case "locon", "lycoris", "dora":
-		return "lycoris"
-	case "checkpoint", "model", "checkpointmerge", "checkpoint trained":
-		return "checkpoint"
-	case "textualinversion", "embedding", "textual inversion":
-		return "embedding"
-	case "vae":
-		return "vae"
-	case "controlnet":
-		return "controlnet"
-	case "upscaler", "aestheticgradient":
-		return "upscaler"
-	}
-	return ""
+	return modeltype.Normalize(v)
 }
 
 // normalizeBaseModel collapses the many spellings the tools use for the same

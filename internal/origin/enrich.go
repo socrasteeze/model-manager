@@ -9,6 +9,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/provenance"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/thumb"
 )
 
 // EnrichOptions configures an enrichment run.
@@ -186,14 +187,29 @@ func fetchImages(ctx context.Context, opts EnrichOptions, st *store.Store, sha s
 		if err != nil {
 			continue
 		}
-		if err := st.AddPreviewImage(store.PreviewImage{
+
+		p := store.PreviewImage{
 			SHA256:      sha,
 			ImageSHA256: blob.SHA256,
 			MIME:        blob.MIME,
 			Bytes:       blob.Bytes,
 			Source:      provenance.SourceCivitai,
 			Position:    i,
-		}); err == nil {
+		}
+		// A grid-sized copy, derived once here so the library does not send a
+		// full-size render to every card on every page. Failure is not fatal:
+		// an image that will not scale is still a valid preview, and the grid
+		// falls back to the full one.
+		if t, err := thumb.Derive(data); err == nil {
+			if tb, err := opts.Blobs.Put(t.Data); err == nil {
+				p.ThumbSHA256 = tb.SHA256
+			}
+			p.Width, p.Height = t.SourceWidth, t.SourceHeight
+		} else if w, h, err := thumb.Dimensions(data); err == nil {
+			p.Width, p.Height = w, h
+		}
+
+		if err := st.AddPreviewImage(p); err == nil {
 			stored++
 		}
 	}

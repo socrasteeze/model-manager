@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/socrasteeze/model-manager/internal/download"
+	"github.com/socrasteeze/model-manager/internal/store"
 )
 
 // downloadRequest is the body of POST /api/downloads.
@@ -42,8 +43,14 @@ type downloadRequest struct {
 	// DestRoot must be one of the roots reported by GET /api/downloads/roots.
 	DestRoot string `json:"dest_root"`
 
-	// Subdir is an optional relative directory beneath DestRoot.
+	// Subdir is an optional relative directory beneath DestRoot. Left empty,
+	// the server picks one from Type and the destination root's folder map.
 	Subdir string `json:"subdir,omitempty"`
+
+	// Type is the model type, used to resolve the subfolder. The client sends
+	// what the provider called it; the server normalizes it and refuses to
+	// invent a directory from anything it does not recognise.
+	Type string `json:"type,omitempty"`
 
 	Filename string `json:"filename,omitempty"`
 
@@ -81,7 +88,25 @@ func (s *Server) handleCreateDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	destDir, matchedRoot, err := s.resolveDestination(req.DestRoot, req.Subdir)
+	destRoot := strings.TrimSpace(req.DestRoot)
+	if destRoot == "" {
+		if def, err := s.defaultDownloadRoot(); err == nil {
+			destRoot = def
+		}
+	}
+
+	// Subfolder policy is the server's, not the client's. A caller-supplied
+	// subdir is still honoured -- the user may genuinely want one -- but the
+	// default comes from (root, type) here rather than from a string the
+	// browser built out of a provider's type name.
+	subdir := req.Subdir
+	if strings.TrimSpace(subdir) == "" {
+		if canonical, err := store.CanonicalRoot(destRoot); err == nil {
+			subdir = s.subfolderFor(canonical, req.Type)
+		}
+	}
+
+	destDir, matchedRoot, err := s.resolveDestination(destRoot, subdir)
 	if err != nil {
 		writeError(w, http.StatusForbidden, "invalid destination", err.Error())
 		return
@@ -180,22 +205,13 @@ func (s *Server) handleDownloadRoots(w http.ResponseWriter, r *http.Request) {
 
 // scannedRoots returns the distinct roots already recorded in the index.
 func (s *Server) scannedRoots() ([]string, error) {
-	rows, err := s.cfg.Store.DB().Query(
-		`SELECT DISTINCT root FROM model_file_path WHERE root <> '' ORDER BY root`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	roots := []string{}
-	for rows.Next() {
-		var root string
-		if err := rows.Scan(&root); err != nil {
-			return nil, err
-		}
-		roots = append(roots, root)
-	}
-	return roots, rows.Err()
+	// The managed-roots table is the authority. Before Phase 7 this was
+	// SELECT DISTINCT root FROM model_file_path, which could not express a root
+	// the user added but has not scanned yet -- and, worse, would keep offering
+	// a root the user had removed, since removal marks paths absent rather than
+	// deleting them. Migration 4 backfilled the table from exactly that query,
+	// so an existing library sees no change.
+	return s.cfg.Store.EnabledRootPaths()
 }
 
 // resolveDestination validates a requested destination.
@@ -222,6 +238,19 @@ func (s *Server) resolveDestination(root, subdir string) (string, string, error)
 		if pathsEqual(k, root) {
 			matched = k
 			break
+		}
+	}
+	// Managed roots are stored symlink-resolved, so a caller naming the link
+	// rather than the target is asking for a root that exists. Resolve and try
+	// once more, rather than refusing a legitimate destination on a spelling.
+	if matched == "" {
+		if canonical, err := store.CanonicalRoot(root); err == nil {
+			for _, k := range known {
+				if pathsEqual(k, canonical) {
+					matched = k
+					break
+				}
+			}
 		}
 	}
 	if matched == "" {

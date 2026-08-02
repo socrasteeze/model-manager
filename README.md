@@ -37,6 +37,7 @@ All phases implemented. One static binary, no services, no configuration.
 | 4 | SSD tiering | [phase4-5](docs/phase4-5.md) |
 | 5 | Sidecar projection | [phase4-5](docs/phase4-5.md) |
 | 6 | Remote browsing across Civitai/CivArchive/HuggingFace, update checking, downloads from the UI | [phase6](docs/phase6.md) |
+| 7 | Managed directories, per-tool download folders, persistent filters, editable thumbnails | [phase7](docs/phase7.md) |
 
 ## Install
 
@@ -117,6 +118,7 @@ mm project --target stability-matrix         # write sidecars back out
 | `link-probe` | Report which link mechanisms work between two directories |
 | `detect` | Find installed SD tools and their model roots |
 | `reindex` | Rebuild the search index and re-resolve every record |
+| `thumbs` | Derive grid-sized copies of previews that lack one |
 | `report` | Distinct models, duplication, size distribution |
 | `verify` | Re-read files and check the index against the disk |
 | `bench` | Compare hashing throughput at different worker counts |
@@ -130,6 +132,18 @@ mm project --target stability-matrix         # write sidecars back out
   view entries, tier copies, and sidecars — plus its own state: the SQLite
   database beside it, the preview-image store written by `enrich`, and transient
   partial-download and probe files that are cleaned up after use.
+- **Removing a directory from the library never touches the disk.** It marks
+  the paths absent and keeps every model record, so re-adding the folder later
+  restores what was known rather than re-deriving it.
+- **A download destination is always a directory you registered.** Never a path
+  typed into the browser, never inferred from a URL or a filename. Which
+  subfolder within it is decided by the server from the model type and that
+  directory's layout, and an unrecognised type lands in the directory itself
+  rather than in a folder invented from its name.
+- **A thumbnail you chose is yours.** Preview bytes are copied into the
+  content-addressed store, so a takedown upstream cannot blank a local one, and
+  a manually chosen image outranks every fetched one — enrichment can never
+  displace it.
 - **Reports duplicates, never deletes them.** Surfacing them is the feature.
 - **Manual metadata is never overwritten by any ingest.** When an origin later
   disagrees, that surfaces as a suggestion with one-click accept, not a silent

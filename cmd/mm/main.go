@@ -60,6 +60,7 @@ COMMANDS
     link-probe Report which link mechanisms work between two directories
     detect     Find installed SD tools and their model roots
     reindex    Rebuild the search index and re-resolve every record
+    thumbs     Derive grid-sized copies of previews that lack one
     report     Summarize the index: distinct models, duplication, size spread
     verify     Re-read files and check the index against the disk
     bench      Compare hashing throughput at different worker counts
@@ -107,6 +108,8 @@ func main() {
 		err = cmdDetect(os.Args[2:])
 	case "reindex":
 		err = cmdReindex(os.Args[2:])
+	case "thumbs":
+		err = cmdThumbs(ctx, os.Args[2:])
 	case "report":
 		err = cmdReport(os.Args[2:])
 	case "verify":
@@ -214,6 +217,23 @@ rescan of an unchanged tree costs a stat pass, not a hash pass.`)
 	}
 	if !*quiet {
 		fmt.Fprintln(os.Stderr)
+	}
+
+	// Register what was just scanned as a managed root, so a root first seen on
+	// the command line is the same first-class thing as one added from the UI:
+	// listable, labellable, and offered as a download destination. Already
+	// managed, overlapping, or unreadable roots are skipped silently -- the
+	// scan itself is the deliverable, and failing it over bookkeeping would be
+	// backwards.
+	for _, r := range res.Roots {
+		if r.Status != store.StatusCompleted {
+			continue
+		}
+		if _, err := st.AddRoot(r.Root, "", ""); err != nil &&
+			!errors.Is(err, store.ErrRootExists) && !errors.Is(err, store.ErrRootNested) {
+			logf("note: could not register %s as a managed root: %v", r.Root, err)
+		}
+		_ = st.MarkRootScanned(r.Root)
 	}
 
 	for _, r := range res.Roots {
