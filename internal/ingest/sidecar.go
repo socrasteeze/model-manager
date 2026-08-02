@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/socrasteeze/model-manager/internal/basemodel"
 	"github.com/socrasteeze/model-manager/internal/modeltype"
 	"github.com/socrasteeze/model-manager/internal/provenance"
 	"github.com/socrasteeze/model-manager/internal/store"
@@ -407,38 +408,14 @@ func normalizeType(v string) string {
 
 // normalizeBaseModel collapses the many spellings the tools use for the same
 // family, so filtering by base model returns one bucket rather than six.
+// normalizeBaseModel collapses the many spellings the tools use for one family.
+//
+// Delegates to internal/basemodel, which is shared with the path heuristic. The
+// two used to be separate tables that disagreed -- this one knew Flux and
+// nothing about Anima or Krea, the other knew "Anima 2B" and "Krea 2" -- so the
+// same model could land in one bucket from a sidecar and another from its path.
 func normalizeBaseModel(v string) string {
-	s := strings.ToLower(strings.TrimSpace(v))
-	if s == "" {
-		return ""
-	}
-	switch {
-	case strings.Contains(s, "pony"):
-		return "Pony"
-	case strings.Contains(s, "illustrious"):
-		return "Illustrious"
-	case strings.Contains(s, "noobai"):
-		return "NoobAI"
-	case strings.Contains(s, "sdxl") || strings.Contains(s, "sd xl") || s == "xl":
-		return "SDXL"
-	case strings.Contains(s, "flux"):
-		return "Flux"
-	case strings.Contains(s, "sd 3") || strings.Contains(s, "sd3"):
-		return "SD 3"
-	case strings.Contains(s, "sd 1") || strings.Contains(s, "sd1"):
-		return "SD 1.5"
-	case strings.Contains(s, "sd 2") || strings.Contains(s, "sd2"):
-		return "SD 2.x"
-	case strings.Contains(s, "qwen"):
-		return "Qwen"
-	case strings.Contains(s, "wan"):
-		return "Wan"
-	case strings.Contains(s, "hunyuan"):
-		return "Hunyuan"
-	}
-	// An unrecognized base model is kept verbatim: the set is open-ended and a
-	// new architecture appearing should not silently vanish from the index.
-	return strings.TrimSpace(v)
+	return basemodel.Normalize(v)
 }
 
 func mapArchitecture(v string) string {

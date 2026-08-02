@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/socrasteeze/model-manager/internal/basemodel"
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/comfy"
 	"github.com/socrasteeze/model-manager/internal/store"
@@ -42,24 +43,119 @@ func (s *Server) comfyClient() (*comfy.Client, error) {
 	return comfy.NewClient(base)
 }
 
-// workflowTemplate returns the configured workflow, or the built-in default.
-func (s *Server) workflowTemplate() json.RawMessage {
-	var raw json.RawMessage
-	if ok, _ := s.cfg.Store.GetSettingInto(store.SettingComfyWorkflow, &raw); ok && len(raw) > 0 {
-		// Stored as a JSON string when it came from a textarea, or as an object
-		// when a client sent the graph directly. Both are accepted, because
-		// making the user care which one their editor produced is a papercut
-		// with no upside.
-		var asString string
-		if err := json.Unmarshal(raw, &asString); err == nil {
-			if strings.TrimSpace(asString) != "" {
-				return json.RawMessage(asString)
-			}
-		} else {
-			return raw
-		}
+// workflowTemplate returns the workflow to use for a model of this base-model
+// family, falling back to the default and then to the built-in one.
+//
+// Per family, not one global graph, for the same reason download folders are
+// per (root, type) rather than global: an SDXL/Illustrious lora and a FLUX.2
+// lora are not two spellings of one thing. They need different loaders, a
+// different text encoder, a different VAE. A single graph would silently render
+// the wrong thing -- or more likely fail in ComfyUI with a node error about a
+// model it cannot load.
+//
+// Stored as {"<family>": <workflow>, "": <default>}. A bare string or object,
+// as earlier versions stored, is read as the default for everything.
+func (s *Server) workflowTemplate(family string) json.RawMessage {
+	byFamily, fallback := s.workflowSettings()
+	if wf, ok := byFamily[family]; ok && len(wf) > 0 {
+		return wf
+	}
+	if len(fallback) > 0 {
+		return fallback
 	}
 	return comfy.DefaultWorkflow
+}
+
+// workflowSettings decodes the stored workflow setting into a per-family map
+// and a default.
+func (s *Server) workflowSettings() (map[string]json.RawMessage, json.RawMessage) {
+	var raw json.RawMessage
+	ok, _ := s.cfg.Store.GetSettingInto(store.SettingComfyWorkflow, &raw)
+	if !ok || len(raw) == 0 {
+		return nil, nil
+	}
+
+	// A JSON string is a whole workflow pasted into a textarea, which earlier
+	// versions stored directly. Kept working rather than migrated: it is the
+	// same thing as "the default for every family".
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		if strings.TrimSpace(asString) == "" {
+			return nil, nil
+		}
+		return nil, json.RawMessage(asString)
+	}
+
+	var byFamily map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &byFamily); err != nil {
+		return nil, nil
+	}
+	// Distinguishing a per-family map from a bare graph: a graph's values are
+	// node objects with a class_type, a map's values are workflows. The marker
+	// is the key -- a family map is keyed by family names, never by node ids.
+	if looksLikeGraph(byFamily) {
+		return nil, raw
+	}
+
+	out := make(map[string]json.RawMessage, len(byFamily))
+	var fallback json.RawMessage
+	for family, wf := range byFamily {
+		// Each value may itself be a JSON string, for the same textarea reason.
+		decoded := wf
+		var inner string
+		if err := json.Unmarshal(wf, &inner); err == nil {
+			if strings.TrimSpace(inner) == "" {
+				continue
+			}
+			decoded = json.RawMessage(inner)
+		}
+		if family == "" {
+			fallback = decoded
+			continue
+		}
+		out[family] = decoded
+	}
+	return out, fallback
+}
+
+// looksLikeGraph reports whether a decoded object is a ComfyUI graph rather
+// than a family map, by asking whether its values are nodes.
+func looksLikeGraph(obj map[string]json.RawMessage) bool {
+	for _, raw := range obj {
+		var node struct {
+			ClassType string `json:"class_type"`
+		}
+		if err := json.Unmarshal(raw, &node); err == nil && node.ClassType != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// checkpointFor picks the base checkpoint for a family.
+//
+// Also per family, and for a blunter reason than the workflow: rendering an
+// Illustrious lora on a FLUX.2 checkpoint does not produce a worse picture, it
+// produces a ComfyUI error. Stored the same way -- a map, or a bare string
+// meaning "for everything".
+func (s *Server) checkpointFor(family string) string {
+	var raw json.RawMessage
+	ok, _ := s.cfg.Store.GetSettingInto(store.SettingComfyCheckpoint, &raw)
+	if !ok || len(raw) == 0 {
+		return ""
+	}
+	var asString string
+	if err := json.Unmarshal(raw, &asString); err == nil {
+		return strings.TrimSpace(asString)
+	}
+	var byFamily map[string]string
+	if err := json.Unmarshal(raw, &byFamily); err != nil {
+		return ""
+	}
+	if c, ok := byFamily[family]; ok && strings.TrimSpace(c) != "" {
+		return strings.TrimSpace(c)
+	}
+	return strings.TrimSpace(byFamily[""])
 }
 
 type renderRequest struct {
@@ -102,12 +198,14 @@ func (s *Server) handleRenderPreview(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
 	}
 
+	vars := s.renderVars(sha, detail, req)
+
 	template := req.Workflow
 	if len(template) == 0 {
-		template = s.workflowTemplate()
+		template = s.workflowTemplate(vars.BaseModel)
 	}
 
-	graph, err := comfy.Fill(template, s.renderVars(sha, detail, req))
+	graph, err := comfy.Fill(template, vars)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "workflow could not be prepared", err.Error())
 		return
@@ -153,13 +251,6 @@ func (s *Server) renderVars(sha string, detail *ModelDetail, req renderRequest) 
 	if v.Negative == "" {
 		v.Negative = comfy.DefaultNegative
 	}
-	if v.Checkpoint == "" {
-		var configured string
-		if ok, _ := s.cfg.Store.GetSettingInto(store.SettingComfyCheckpoint, &configured); ok {
-			v.Checkpoint = configured
-		}
-	}
-
 	// The model's own filename as ComfyUI would load it. Not the full path: a
 	// ComfyUI node names a file relative to its models directory, and the
 	// absolute path this library records would not resolve there.
@@ -174,8 +265,14 @@ func (s *Server) renderVars(sha string, detail *ModelDetail, req renderRequest) 
 	}
 	if rec := detail.Record; rec != nil {
 		v.Name = rec.Name
-		v.BaseModel = rec.BaseModel
+		v.BaseModel = basemodel.Normalize(rec.BaseModel)
 		v.TriggerWords = rec.TriggerWords
+	}
+	// Resolved after the family is known, because the checkpoint is per family:
+	// an Illustrious lora rendered on a FLUX.2 checkpoint is a ComfyUI error,
+	// not a worse picture.
+	if v.Checkpoint == "" {
+		v.Checkpoint = s.checkpointFor(v.BaseModel)
 	}
 	return v
 }
@@ -222,6 +319,10 @@ func (s *Server) handleComfyStatus(w http.ResponseWriter, r *http.Request) {
 		"configured":   false,
 		"reachable":    false,
 		"placeholders": comfy.Placeholders,
+		// The families the settings UI offers a workflow slot for. One graph
+		// cannot serve four architectures, so the UI has to know which ones
+		// exist to ask about.
+		"base_models": basemodel.Known,
 	}
 
 	client, err := s.comfyClient()

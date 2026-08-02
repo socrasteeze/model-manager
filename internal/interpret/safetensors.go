@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/socrasteeze/model-manager/internal/basemodel"
 	"github.com/socrasteeze/model-manager/internal/provenance"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
@@ -205,7 +206,12 @@ func inferBaseFromTensors(names []string) string {
 
 	switch {
 	case hasFlux:
-		return "Flux"
+		// The tensor names matched here (double_blocks/single_blocks) are the
+		// Flux DiT layout, which says nothing about the version. Flux.1 is the
+		// honest guess -- it is what the overwhelming majority of Flux weights
+		// on disk are -- and this is the weakest provenance tier, so a sidecar
+		// or a path segment naming Flux.2 or Krea supersedes it.
+		return basemodel.Flux1
 	case hasSD3:
 		return "SD 3"
 	case hasPatchEmbedding && hasSelfAttnBlocks:
@@ -319,7 +325,10 @@ func mapKohyaBaseModel(v string) string {
 	case strings.HasPrefix(v, "sd3"):
 		return "SD 3"
 	case strings.HasPrefix(v, "flux"):
-		return "Flux"
+		// Real text, so the family can actually be told apart here rather than
+		// guessed: flux2/klein and krea are different architectures needing
+		// different loaders, not spellings of one.
+		return basemodel.Normalize(v)
 	case strings.HasPrefix(v, "sd_v1"):
 		return "SD 1.5"
 	case strings.HasPrefix(v, "sd_v2"):
@@ -456,7 +465,7 @@ func mapModelSpecArchitecture(arch string) string {
 	case strings.Contains(l, "stable-diffusion-v3") || strings.Contains(l, "sd3"):
 		return "SD 3"
 	case strings.Contains(l, "flux"):
-		return "Flux"
+		return basemodel.Normalize(arch)
 	case strings.Contains(l, "stable-cascade"):
 		return "Stable Cascade"
 	case strings.Contains(l, "stable-diffusion-v1"):

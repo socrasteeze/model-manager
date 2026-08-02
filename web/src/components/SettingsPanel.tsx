@@ -29,6 +29,42 @@ import {
   type ScanJob,
 } from '../api'
 
+/**
+ * Reads a setting that may be either a bare value ("use this for everything")
+ * or a per-family map, and returns a map either way.
+ *
+ * Both shapes are accepted rather than migrated: a bare value is what earlier
+ * versions stored and is still the right thing to write when there is only one
+ * family to configure.
+ */
+function asFamilyMap(value: unknown): Record<string, string> {
+  if (typeof value === 'string') return value.trim() ? { '': value } : {}
+  if (value && typeof value === 'object') {
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof v === 'string') out[k] = v
+      else if (v && typeof v === 'object') out[k] = JSON.stringify(v, null, 2)
+    }
+    return out
+  }
+  return {}
+}
+
+/** Writes a family map back, dropping blank slots and resetting when empty. */
+function saveMap(
+  key: string,
+  map: Record<string, string>,
+  run: (fn: () => Promise<unknown>) => Promise<void> | void,
+) {
+  const cleaned: Record<string, string> = {}
+  for (const [k, v] of Object.entries(map)) {
+    if (v.trim()) cleaned[k] = v
+  }
+  void run(() =>
+    Object.keys(cleaned).length ? putSetting(key, cleaned) : deleteSetting(key),
+  )
+}
+
 const TOOL_LABELS: Record<string, string> = {
   'stability-matrix': 'Stability Matrix',
   swarmui: 'SwarmUI',
@@ -56,8 +92,9 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
   const [defaultRoot, setDefaultRoot] = useState('')
   const [comfyOut, setComfyOut] = useState('')
   const [comfyUrl, setComfyUrl] = useState('')
-  const [comfyCkpt, setComfyCkpt] = useState('')
-  const [workflow, setWorkflow] = useState('')
+  const [checkpoints, setCheckpoints] = useState<Record<string, string>>({})
+  const [workflows, setWorkflows] = useState<Record<string, string>>({})
+  const [family, setFamily] = useState('')
   const [comfy, setComfy] = useState<ComfyStatus | null>(null)
   const [newPath, setNewPath] = useState('')
   const [suggestions, setSuggestions] = useState<string[]>([])
@@ -80,9 +117,11 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
         setDefaultRoot((s[SETTING_DEFAULT_ROOT] as string) ?? '')
         setComfyOut((s[SETTING_COMFY_OUTPUT] as string) ?? '')
         setComfyUrl((s[SETTING_COMFY_URL] as string) ?? '')
-        setComfyCkpt((s[SETTING_COMFY_CHECKPOINT] as string) ?? '')
-        const wf = s[SETTING_COMFY_WORKFLOW]
-        setWorkflow(typeof wf === 'string' ? wf : wf ? JSON.stringify(wf, null, 2) : '')
+        // Both settings accept a bare value (meaning "for every family") or a
+        // map. Normalized to a map here so the editor has one shape to deal
+        // with, and written back the same way.
+        setCheckpoints(asFamilyMap(s[SETTING_COMFY_CHECKPOINT]))
+        setWorkflows(asFamilyMap(s[SETTING_COMFY_WORKFLOW]))
       })
       .catch(() => {})
     comfyStatus().then(setComfy).catch(() => setComfy(null))
@@ -427,31 +466,47 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
               : comfy.error || 'Configured, but nothing is answering.'}
         </p>
 
+        <p className="hint">
+          A checkpoint and a workflow are kept <strong>per base model</strong>. An
+          SDXL/Illustrious lora and a FLUX.2 one need different loaders, a different
+          text encoder and a different VAE — a single graph would not render a worse
+          picture, it would fail in ComfyUI. Pick a family below; the{' '}
+          <em>Default</em> slot covers everything you have not set up.
+        </p>
+
+        <div className="family-tabs">
+          {['', ...(comfy?.base_models ?? [])].map((f) => (
+            <button
+              key={f || 'default'}
+              className={`chip${family === f ? ' on' : ''}${
+                workflows[f] || checkpoints[f] ? ' configured' : ''
+              }`}
+              onClick={() => setFamily(f)}
+            >
+              {f || 'Default'}
+            </button>
+          ))}
+        </div>
+
         <label className="setting-row">
-          <span>Base checkpoint</span>
+          <span>Checkpoint for {family || 'everything else'}</span>
           <input
             type="text"
-            placeholder="sd_xl_base_1.0.safetensors"
-            value={comfyCkpt}
+            placeholder={family === '' ? 'sd_xl_base_1.0.safetensors' : '(use the default)'}
+            value={checkpoints[family] ?? ''}
             disabled={readOnly}
             spellCheck={false}
-            onChange={(e) => setComfyCkpt(e.target.value)}
-            onBlur={() =>
-              run(() =>
-                comfyCkpt.trim()
-                  ? putSetting(SETTING_COMFY_CHECKPOINT, comfyCkpt.trim())
-                  : deleteSetting(SETTING_COMFY_CHECKPOINT),
-              )
-            }
+            onChange={(e) => setCheckpoints({ ...checkpoints, [family]: e.target.value })}
+            onBlur={() => saveMap(SETTING_COMFY_CHECKPOINT, checkpoints, run)}
           />
         </label>
         <p className="hint">
-          A lora cannot render anything by itself, so a preview has to be generated on
-          top of a checkpoint. Name it exactly as ComfyUI lists it.
+          A lora cannot render anything by itself, so a preview is generated on top of
+          a checkpoint. Name it exactly as ComfyUI lists it.
         </p>
 
-        <details className="workflow-editor">
-          <summary>Workflow</summary>
+        <details className="workflow-editor" open={Boolean(workflows[family])}>
+          <summary>Workflow for {family || 'everything else'}</summary>
           <p className="hint">
             ComfyUI&rsquo;s <strong>API format</strong>, not the editor format — in
             ComfyUI, enable <em>Settings &rsaquo; Dev mode</em> and use{' '}
@@ -459,22 +514,17 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
             {(comfy?.placeholders ?? []).map((p) => (
               <code key={p}>{`{{${p}}}`}</code>
             ))}
-            . Leave blank for the built-in default.
+            . Leave blank to fall back to the default slot, and leave that blank for
+            the built-in SDXL-shaped graph.
           </p>
           <textarea
             rows={14}
             spellCheck={false}
-            value={workflow}
+            value={workflows[family] ?? ''}
             disabled={readOnly}
-            placeholder="(built-in default)"
-            onChange={(e) => setWorkflow(e.target.value)}
-            onBlur={() =>
-              run(() =>
-                workflow.trim()
-                  ? putSetting(SETTING_COMFY_WORKFLOW, workflow)
-                  : deleteSetting(SETTING_COMFY_WORKFLOW),
-              )
-            }
+            placeholder={family === '' ? '(built-in default)' : '(use the default slot)'}
+            onChange={(e) => setWorkflows({ ...workflows, [family]: e.target.value })}
+            onBlur={() => saveMap(SETTING_COMFY_WORKFLOW, workflows, run)}
           />
         </details>
       </section>

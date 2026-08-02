@@ -101,7 +101,9 @@ func TestBaseModelInferenceFromTensorNames(t *testing.T) {
 		want    string
 	}{
 		{"sdxl via second text encoder", []string{"lora_te2_text_model.lora_down.weight"}, "SDXL"},
-		{"flux", []string{"double_blocks.0.weight"}, "Flux"},
+		// Tensor shapes carry no version, so this is the weakest tier's honest
+		// guess; a sidecar or path naming Flux.2 outranks it.
+		{"flux", []string{"double_blocks.0.weight"}, "Flux.1"},
 		{"sd3", []string{"joint_blocks.0.weight"}, "SD 3"},
 		{"sd15 has nothing distinctive", []string{"lora_unet_mid.lora_down.weight"}, ""},
 	}
@@ -309,7 +311,10 @@ func TestPathHeuristics(t *testing.T) {
 		{"/models/vae/sdxl_vae.safetensors", "vae", "SDXL", "sdxl vae"},
 		{"/models/embeddings/badhands.pt", "embedding", "", "badhands"},
 		{"/models/controlnet/canny.safetensors", "controlnet", "", "canny"},
-		{"/models/loras/Flux/mystyle.safetensors", "lora", "Flux", "mystyle"},
+		// A directory named just "Flux" predates Flux.2, so it means Flux.1 --
+		// which is the whole reason the two are separate families now: they need
+		// different loaders in ComfyUI.
+		{"/models/loras/Flux/mystyle.safetensors", "lora", "Flux.1", "mystyle"},
 		{"/random/place/thing.safetensors", "", "", "thing"},
 	}
 	for _, c := range cases {

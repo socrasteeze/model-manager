@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/socrasteeze/model-manager/internal/basemodel"
 	"github.com/socrasteeze/model-manager/internal/comfy"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
@@ -245,5 +246,100 @@ func TestNonImageFromComfyIsRefused(t *testing.T) {
 	}
 	if previews, _ := s.cfg.Store.PreviewImages("aaa"); len(previews) != 0 {
 		t.Errorf("a non-image was attached anyway: %+v", previews)
+	}
+}
+
+// One graph cannot serve four architectures. An SDXL/Illustrious lora and a
+// FLUX.2 lora need different loaders, a different text encoder and a different
+// VAE, so the workflow is chosen by base-model family the same way a download
+// folder is chosen by (root, type).
+func TestWorkflowIsChosenByBaseModelFamily(t *testing.T) {
+	s := renderServer(t, "")
+
+	illustrious := `{"1":{"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":"{{checkpoint}}"}}}`
+	flux2 := `{"1":{"class_type":"UNETLoader","inputs":{"unet_name":"{{checkpoint}}"}}}`
+	fallback := `{"1":{"class_type":"FallbackNode","inputs":{}}}`
+
+	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflow, map[string]string{
+		basemodel.Illustrious: illustrious,
+		basemodel.Flux2:       flux2,
+		"":                    fallback,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := string(s.workflowTemplate(basemodel.Illustrious)); got != illustrious {
+		t.Errorf("Illustrious got the wrong graph:\n%s", got)
+	}
+	if got := string(s.workflowTemplate(basemodel.Flux2)); got != flux2 {
+		t.Errorf("Flux.2 got the wrong graph:\n%s", got)
+	}
+	// A family with no slot configured falls to the default rather than to a
+	// graph belonging to a different architecture.
+	if got := string(s.workflowTemplate(basemodel.Anima)); got != fallback {
+		t.Errorf("Anima did not fall back to the default:\n%s", got)
+	}
+}
+
+// Earlier versions stored one workflow as a plain string. That must keep
+// working and mean "the default for every family" rather than breaking renders.
+func TestABareWorkflowStringStillWorksAsTheDefault(t *testing.T) {
+	s := renderServer(t, "")
+
+	graph := `{"1":{"class_type":"KSampler","inputs":{}}}`
+	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflow, graph); err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range []string{basemodel.Illustrious, basemodel.Flux2, ""} {
+		if got := string(s.workflowTemplate(family)); got != graph {
+			t.Errorf("family %q got %s", family, got)
+		}
+	}
+}
+
+// A graph stored directly as an object must not be mistaken for a family map --
+// its keys are node ids, and reading them as family names would leave every
+// family with no workflow at all.
+func TestAGraphObjectIsNotMistakenForAFamilyMap(t *testing.T) {
+	s := renderServer(t, "")
+
+	graph := json.RawMessage(`{"1":{"class_type":"KSampler","inputs":{"seed":1}}}`)
+	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflow, graph); err != nil {
+		t.Fatal(err)
+	}
+	got := s.workflowTemplate(basemodel.Illustrious)
+	if !strings.Contains(string(got), "KSampler") {
+		t.Errorf("a directly-stored graph was lost: %s", got)
+	}
+}
+
+// Rendering an Illustrious lora on a FLUX.2 checkpoint is not a worse picture,
+// it is a ComfyUI error -- so the checkpoint is per family too.
+func TestCheckpointIsChosenByFamily(t *testing.T) {
+	s := renderServer(t, "")
+
+	if err := s.cfg.Store.PutSetting(store.SettingComfyCheckpoint, map[string]string{
+		basemodel.Illustrious: "illustrious_v2.safetensors",
+		basemodel.Flux2:       "flux2-klein.safetensors",
+		"":                    "sd_xl_base_1.0.safetensors",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.checkpointFor(basemodel.Illustrious); got != "illustrious_v2.safetensors" {
+		t.Errorf("Illustrious checkpoint = %q", got)
+	}
+	if got := s.checkpointFor(basemodel.Flux2); got != "flux2-klein.safetensors" {
+		t.Errorf("Flux.2 checkpoint = %q", got)
+	}
+	if got := s.checkpointFor(basemodel.Anima); got != "sd_xl_base_1.0.safetensors" {
+		t.Errorf("unconfigured family did not fall back: %q", got)
+	}
+
+	// And a bare string, as earlier versions stored, still means "everything".
+	if err := s.cfg.Store.PutSetting(store.SettingComfyCheckpoint, "one.safetensors"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.checkpointFor(basemodel.Flux2); got != "one.safetensors" {
+		t.Errorf("bare checkpoint string = %q", got)
 	}
 }

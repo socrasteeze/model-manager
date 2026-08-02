@@ -289,6 +289,32 @@ ComfyUI's dev mode). Catching it in the goroutine instead would hand back a 202
 and an ID, and a one-step mistake would look like a render that started and
 quietly died.
 
+### One workflow per base-model family
+
+A single graph cannot serve a library. SDXL/Illustrious loads a checkpoint and
+applies a lora to it; FLUX.2 needs a UNET loader, a dual CLIP loader and its own
+VAE; Krea is Flux.1-derived and different again. Handed the wrong graph, ComfyUI
+does not render a worse picture — it errors on a model it cannot load.
+
+So the workflow and the base checkpoint are stored **per family**, keyed by
+family name with `""` as the default slot, exactly as download folders are keyed
+by `(root, type)`:
+
+    {"Illustrious": <graph>, "Flux.2": <graph>, "": <graph>}
+
+Resolution is family → default slot → the built-in graph. A bare string, which
+earlier versions stored, still reads as "the default for everything" rather than
+breaking; and a graph stored directly as an object is told apart from a family
+map by asking whether its values are nodes, since a family map is keyed by
+family names and a graph by node ids.
+
+**Only the SDXL-shaped default ships.** Correct API-format graphs for FLUX.2
+klein, Krea 2 and Anima are not shipped because they cannot be written blind —
+node names and required loaders differ per architecture, and a wrong graph that
+looks plausible is worse than an empty slot. Export one per family from ComfyUI
+with *Save (API Format)* and paste it into the matching slot; the settings UI
+marks which families you have filled in.
+
 ### Filling the template
 
 One workflow is stored and reused for every model, so the model's own filename,
@@ -337,6 +363,42 @@ Rendering stays available. That flag exists to stop the daemon talking to
 operator typed into their own settings is not one; it is the same class of local
 resource as the output folder the picker already reads. Rendering is gated on
 `--writable` instead, because it creates a preview.
+
+## Base-model families
+
+A second vocabulary got the same treatment the model types did, and for the same
+reason: it was being derived in two places that disagreed. `internal/ingest`
+knew Flux and nothing about Anima or Krea; `internal/interpret` knew "Anima 2B"
+and "Krea 2" and nothing about how they related to anything. The same model
+could therefore bucket one way from a sidecar and another from its path, which
+makes a base-model filter quietly lie.
+
+`internal/basemodel` is now the single table, shared by the sidecar tier, the
+path heuristic and the header heuristic. It matters twice over now, because the
+family also decides which ComfyUI graph can render a preview.
+
+Three deliberate choices in it:
+
+- **Flux is split.** Flux.1, Flux.2 and Krea used to collapse into one "Flux"
+  bucket. They need three different graphs, so they are three families, and the
+  patterns are ordered so a `flux` match cannot run first and swallow the other
+  two.
+- **Derivatives beat their parent.** An Illustrious model is very often also
+  tagged SDXL; Illustrious is the more specific true statement and the one worth
+  filtering by.
+- **The set stays open.** Unlike a model *type* — which normalizes to `""`
+  because it decides a directory name — an unrecognised base model is kept
+  verbatim. A new architecture ships every few months, and dropping it would
+  erase the one field that says what a file can be used with.
+
+`pony` and `anima` keep strict word boundaries where the other family tokens
+take a suffix (`illustriousXL`, `noobaiXL`, `krea2` all have to match). They are
+the two family names that are also ordinary English words, and a lora called
+`ponytail-hairstyle` or `animal-print` must not be filed as a base model. There
+is a test for exactly that.
+
+Labels are derived data, so `mm interpret` re-derives them: an existing library
+picks up the split without a rescan.
 
 ## Schema
 

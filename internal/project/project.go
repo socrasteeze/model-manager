@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/socrasteeze/model-manager/internal/basemodel"
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
@@ -409,17 +410,28 @@ func toStabilityMatrixType(t string) string {
 
 func toSwarmArchitecture(base string) string {
 	switch base {
-	case "SDXL", "Pony", "Illustrious", "NoobAI":
+	// Anima is grouped with the SDXL derivatives here because SwarmUI's
+	// architecture list has no entry of its own for it, and claiming an
+	// architecture SwarmUI does not know would be worse than the nearest true
+	// statement about what loads it.
+	case basemodel.SDXL, basemodel.Pony, basemodel.Illustrious,
+		basemodel.NoobAI, basemodel.Anima:
 		return "stable-diffusion-xl-v1-base"
-	case "SD 1.5":
+	case basemodel.SD15:
 		return "stable-diffusion-v1"
-	case "SD 2.x":
+	case basemodel.SD2:
 		return "stable-diffusion-v2"
-	case "SD 3":
+	case basemodel.SD3:
 		return "stable-diffusion-v3-medium"
-	case "Flux":
+	case basemodel.Flux1, basemodel.Krea:
+		// Krea is Flux.1-derived, and SwarmUI has no separate label for it.
 		return "Flux.1-dev"
+	case basemodel.Flux2:
+		return "Flux.2-dev"
 	}
+	// An architecture this app cannot name for SwarmUI is left unset rather
+	// than guessed: a wrong architecture makes SwarmUI load the model with the
+	// wrong pipeline, which is worse than SwarmUI not knowing.
 	return ""
 }
 

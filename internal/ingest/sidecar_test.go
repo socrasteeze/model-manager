@@ -134,7 +134,7 @@ func TestLoRAManagerSidecar(t *testing.T) {
 	if p == nil {
 		t.Fatal("lora manager sidecar was not discovered")
 	}
-	if got := value(p, provenance.FieldBaseModel); got != "Flux" {
+	if got := value(p, provenance.FieldBaseModel); got != "Flux.1" {
 		t.Errorf("base_model = %v", got)
 	}
 	if got := value(p, provenance.FieldRecommendedWeight); got != 0.65 {
@@ -297,7 +297,7 @@ func TestNormalizeBaseModel(t *testing.T) {
 		"SDXL 1.0": "SDXL", "SD XL": "SDXL", "sdxl": "SDXL",
 		"Pony Diffusion V6 XL": "Pony", // pony is checked before sdxl
 		"Illustrious XL":       "Illustrious",
-		"Flux.1 D":             "Flux",
+		"Flux.1 D":             "Flux.1",
 		"SD 1.5":               "SD 1.5",
 		"SD 2.1":               "SD 2.x",
 		"":                     "",

@@ -668,7 +668,16 @@ export interface ComfyStatus {
   version?: string
   error?: string
   placeholders: string[]
+  // The base-model families the settings UI offers a workflow slot for. One
+  // graph cannot serve four architectures, so the UI has to know which exist.
+  base_models: string[]
 }
+
+// Workflows and checkpoints are stored per base-model family, keyed by family
+// name with "" as the default. An Illustrious lora and a FLUX.2 lora need
+// different loaders; a single graph would fail in ComfyUI, not degrade.
+export type WorkflowMap = Record<string, string>
+export type CheckpointMap = Record<string, string>
 
 export interface RenderJob {
   id: string

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/socrasteeze/model-manager/internal/basemodel"
 	"github.com/socrasteeze/model-manager/internal/provenance"
 )
 
@@ -61,27 +62,6 @@ func typeFromDirs(dirs []string) string {
 	return ""
 }
 
-// baseModelPatterns are matched against directory segments and the filename.
-// Ordered longest-first so `sdxl` is tested before `sd`.
-var baseModelPatterns = []struct {
-	re   *regexp.Regexp
-	base string
-}{
-	{regexp.MustCompile(`(?i)\b(sdxl|xl)\b`), "SDXL"},
-	{regexp.MustCompile(`(?i)\bpony\b`), "Pony"},
-	{regexp.MustCompile(`(?i)\billustrious\b`), "Illustrious"},
-	{regexp.MustCompile(`(?i)\bnoobai\b`), "NoobAI"},
-	{regexp.MustCompile(`(?i)\bflux(\.1|1)?\b`), "Flux"},
-	{regexp.MustCompile(`(?i)\bsd\s*3(\.5)?\b`), "SD 3"},
-	{regexp.MustCompile(`(?i)\bsd\s*1\.?5\b`), "SD 1.5"},
-	{regexp.MustCompile(`(?i)\bsd\s*2\.?\d?\b`), "SD 2.x"},
-	{regexp.MustCompile(`(?i)\bqwen\b`), "Qwen"},
-	{regexp.MustCompile(`(?i)\bwan\s*2?\.?\d?\b`), "Wan"},
-	{regexp.MustCompile(`(?i)\bhunyuan\b`), "Hunyuan"},
-	{regexp.MustCompile(`(?i)\banima\s*2b\b`), "Anima 2B"},
-	{regexp.MustCompile(`(?i)\bkrea\s*2?\b`), "Krea 2"},
-}
-
 func baseModelFromDirs(dirs []string, stem string) string {
 	for i := len(dirs) - 1; i >= 0; i-- {
 		if b := matchBaseModel(dirs[i]); b != "" {
@@ -93,16 +73,12 @@ func baseModelFromDirs(dirs []string, stem string) string {
 	return matchBaseModel(stem)
 }
 
+// matchBaseModel reports which family a path segment names, or "" if it names
+// none. Shared with the sidecar path through internal/basemodel, so a model
+// identified from its directory buckets the same as one identified from a
+// sidecar.
 func matchBaseModel(s string) string {
-	// Separators become spaces so word-boundary anchors work on the
-	// `my_lora-sdxl_v2` style names that dominate in the wild.
-	normalized := strings.NewReplacer("_", " ", "-", " ", ".", " ").Replace(s)
-	for _, p := range baseModelPatterns {
-		if p.re.MatchString(normalized) {
-			return p.base
-		}
-	}
-	return ""
+	return basemodel.Match(s)
 }
 
 // versionSuffix matches a trailing version marker, but deliberately not a bare

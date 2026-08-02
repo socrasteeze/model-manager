@@ -1297,3 +1297,40 @@ a.ghost {
   line-height: 1.45;
   resize: vertical;
 }
+
+/* Family slots in the ComfyUI settings. A dot marks the ones that have a
+   workflow or checkpoint set, so "what have I actually configured" is one
+   glance rather than a click per family. */
+.family-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0.8rem;
+}
+
+.family-tabs .chip {
+  background: var(--bg-sunken);
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 0.22rem 0.7rem;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-family: inherit;
+}
+
+.family-tabs .chip:hover {
+  color: var(--text);
+}
+
+.family-tabs .chip.on {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.family-tabs .chip.configured::after {
+  content: '•';
+  margin-left: 0.35rem;
+  color: var(--accent);
+}
