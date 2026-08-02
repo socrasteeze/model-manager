@@ -325,7 +325,10 @@ func (r *Registry) SearchAll(ctx context.Context, ids []string, q Query) ([]List
 		ids = r.IDs()
 	}
 	var (
-		out  []Listing
+		// Non-nil so a run where every provider errors still serializes as
+		// [] rather than null -- a JSON consumer iterating the result should
+		// not need a null guard for the ordinary case of "nothing found".
+		out  = []Listing{}
 		errs = map[string]error{}
 	)
 	for _, id := range ids {

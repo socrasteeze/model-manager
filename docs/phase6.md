@@ -86,12 +86,17 @@ local archive as possibly the last surviving copy of a taken-down model's
 metadata, and CivArchive is the one place a record that was never captured can
 still be recovered from. Records with a deletion date surface it in the listing.
 
-> **The endpoint shapes are unverified.** The environment this was written in
-> blocks outbound connections to `civarchive.com`, so none of it has been
-> exercised against a real response. The paths live in one template block
-> (`civArchivePaths` in `internal/origin/civarchive.go`) and the decoder accepts
-> several plausible envelopes, so correcting the mapping is a one-line change.
-> Confirm with `mm browse --provider civarchive --json <query>` and adjust.
+> **Endpoint confirmed; field shapes still being learned.** The build
+> environment blocks outbound connections to `civarchive.com`, so the search
+> path was written against a guess. A live run against the real service
+> confirmed the endpoint and query shape are right — it returned well-formed
+> JSON — but surfaced a field-typing bug: some id fields arrive as strings
+> (`"v9208"`) rather than numbers, which the original `json.Number`-typed
+> decoder rejected outright, failing the whole page over one field. Fixed with
+> a decoder that accepts either and decodes each record independently, so one
+> unfamiliar field costs that record rather than the page. The paths still live
+> in one template block (`civArchivePaths` in `internal/origin/civarchive.go`)
+> for further correction as more of the response shape is confirmed.
 
 ## Credentials
 

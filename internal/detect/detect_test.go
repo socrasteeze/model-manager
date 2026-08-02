@@ -252,3 +252,73 @@ func TestSearchPathOverrideIsHonored(t *testing.T) {
 	}
 	t.Fatalf("override path was not searched; found %+v", found)
 }
+
+// The portable ComfyUI distribution unzips as a wrapper directory (holding
+// python_embeded/, a launch .bat, and a ComfyUI/ subfolder) that carries none
+// of this package's markers itself -- only the child does. Reproduces the
+// user's real E:\ComfyUI layout, which mm detect missed entirely before this
+// fix: the wrapper failed identify() and nothing told the search to look one
+// level deeper into a folder merely named "ComfyUI".
+func TestDetectsPortableComfyUIWrapper(t *testing.T) {
+	base := t.TempDir()
+	wrapper := filepath.Join(base, "ComfyUI")
+	mk(t, wrapper, "python_embeded", "run_nvidia_gpu.bat")
+	real := filepath.Join(wrapper, "ComfyUI")
+	mk(t, real, "comfy", "folder_paths.py", "models/loras")
+
+	t.Setenv("MM_SEARCH_PATHS", base)
+	found := Detect()
+
+	for _, i := range found {
+		if i.Tool == ComfyUI && i.Path == real {
+			return
+		}
+	}
+	t.Fatalf("portable ComfyUI at %s not detected; found %+v", real, found)
+}
+
+// A bare directory happening to be named after a tool must still fail its
+// real markers -- looksLikeToolContainer only widens the search, it must
+// never substitute for identify()'s positive-marker requirement.
+func TestToolNamedDirectoryWithoutMarkersIsNotIdentified(t *testing.T) {
+	base := t.TempDir()
+	fake := filepath.Join(base, "ComfyUI")
+	mk(t, fake, "readme.txt")
+
+	t.Setenv("MM_SEARCH_PATHS", base)
+	found := Detect()
+
+	for _, i := range found {
+		if i.Path == fake || i.Path == base {
+			t.Fatalf("a markerless directory was identified as a tool: %+v", i)
+		}
+	}
+}
+
+func TestComfyTypePathsRecoversPerTypeKeys(t *testing.T) {
+	dir := t.TempDir()
+	modelsBase := filepath.Join(dir, "models")
+	mk(t, modelsBase, "loras", "checkpoints")
+	yaml := "comfyui:\n" +
+		"    base_path: " + modelsBase + "\n" +
+		"    loras: loras\n" +
+		"    checkpoints: checkpoints\n"
+	if err := os.WriteFile(filepath.Join(dir, "extra_model_paths.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mappings := ComfyTypePaths(dir)
+	if len(mappings) != 1 {
+		t.Fatalf("got %d mappings, want 1: %+v", len(mappings), mappings)
+	}
+	m := mappings[0]
+	if m.Section != "comfyui" {
+		t.Errorf("section = %q", m.Section)
+	}
+	if m.TypeDirs["loras"] != filepath.Join(modelsBase, "loras") {
+		t.Errorf("loras dir = %q", m.TypeDirs["loras"])
+	}
+	if m.TypeDirs["checkpoints"] != filepath.Join(modelsBase, "checkpoints") {
+		t.Errorf("checkpoints dir = %q", m.TypeDirs["checkpoints"])
+	}
+}

@@ -218,6 +218,67 @@ func comfyExtraPaths(dir string) (roots []string, notes []string) {
 	return roots, notes
 }
 
+// ComfyPathMapping is one section of extra_model_paths.yaml, resolved to
+// absolute directories.
+type ComfyPathMapping struct {
+	// Section is the YAML top-level key, e.g. "comfyui" or "swarmui" -- the
+	// tool ComfyUI is sharing this folder tree with.
+	Section string `json:"section"`
+
+	// BasePath is the section's base_path, if it set one.
+	BasePath string `json:"base_path,omitempty"`
+
+	// TypeDirs maps the YAML key (ComfyUI's own vocabulary: "loras",
+	// "checkpoints", "vae", ...) to the resolved absolute directory. This is
+	// the same per-type mapping described in spec docs, already written
+	// down by the user in their own ComfyUI config -- recovering it here
+	// means the app can suggest per-type download folders that match what
+	// ComfyUI itself already reads from, instead of guessing.
+	TypeDirs map[string]string `json:"type_dirs,omitempty"`
+}
+
+// ComfyTypePaths reads extra_model_paths.yaml the same way comfyExtraPaths
+// does, but keeps the per-type keys that function discards after using them
+// only to decide whether a value is a root worth scanning.
+//
+// A second read of the same file rather than restructuring comfyExtraPaths:
+// that function's contract (a flat root list plus human-readable notes) is
+// exercised by identify() and is deliberately simple; this one exists for a
+// different consumer -- per-type folder configuration -- and keeping them
+// separate means neither has to compromise its shape for the other. The file
+// is small and this runs only during detection, not on any hot path.
+func ComfyTypePaths(dir string) []ComfyPathMapping {
+	data, err := os.ReadFile(filepath.Join(dir, "extra_model_paths.yaml"))
+	if err != nil {
+		return nil
+	}
+
+	var out []ComfyPathMapping
+	for _, section := range parseSimpleYAML(string(data)) {
+		m := ComfyPathMapping{Section: section.name, TypeDirs: map[string]string{}}
+		base := section.values["base_path"]
+		if base != "" && isDir(base) {
+			m.BasePath = base
+		}
+		for key, val := range section.values {
+			if key == "base_path" || val == "" {
+				continue
+			}
+			resolved := val
+			if !filepath.IsAbs(val) && m.BasePath != "" {
+				resolved = filepath.Join(m.BasePath, val)
+			}
+			if isDir(resolved) {
+				m.TypeDirs[key] = resolved
+			}
+		}
+		if m.BasePath != "" || len(m.TypeDirs) > 0 {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // yamlSection is one top-level key and its immediate children.
 type yamlSection struct {
 	name   string
@@ -402,12 +463,36 @@ func candidatesUnder(base string) []string {
 }
 
 func looksLikeToolContainer(name string) bool {
-	switch strings.ToLower(name) {
+	lower := strings.ToLower(name)
+	switch lower {
 	case "apps", "ai", "tools", "sd", "stable-diffusion", "src", "git",
 		"projects", "programs", "opt", "data":
 		return true
 	}
+	// A directory literally named after a tool is exactly where a portable
+	// download lands unpacked. The official ComfyUI portable build, for
+	// instance, extracts to a wrapper directory (holding python_embeded/,
+	// run_nvidia_gpu.bat, and a ComfyUI/ subfolder) that carries none of
+	// this package's positive markers itself -- only its child does, one
+	// level down. Without this, every portable install of any of these
+	// tools on Windows is invisible: the wrapper fails identify(), and the
+	// generic container list above has no reason to suspect a folder named
+	// "ComfyUI" holds anything worth a second look.
+	for _, hint := range toolNameHints {
+		if strings.Contains(lower, hint) {
+			return true
+		}
+	}
 	return false
+}
+
+// toolNameHints are substrings of the tools this package knows how to
+// identify, used only to decide whether a directory is worth one extra level
+// of search -- never to identify a tool by name alone. A folder matching one
+// of these still has to pass its detector's real markers in identify().
+var toolNameHints = []string{
+	"comfy", "swarmui", "swarm-ui", "stabilitymatrix", "stability-matrix",
+	"invokeai", "fooocus", "forge", "webui", "a1111", "automatic1111",
 }
 
 // searchRoots is where installations plausibly live on this platform.

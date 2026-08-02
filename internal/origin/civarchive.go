@@ -58,17 +58,52 @@ type CivArchiveProvider struct{ Client *Client }
 func (p *CivArchiveProvider) ID() string          { return ProviderCivArchiveID }
 func (p *CivArchiveProvider) DisplayName() string { return "CivArchive" }
 
+// flexID decodes an id that may arrive as either a JSON number or a JSON
+// string ("9208" as well as "v9208"). Confirmed necessary against a live
+// response: CivArchive sends at least one id field as a version-prefixed
+// string, which json.Number rejects outright ("invalid number literal"),
+// taking the whole record down with it. Always stored as text, since these
+// ids are opaque identifiers, never arithmetic.
+type flexID string
+
+func (f *flexID) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || string(b) == "null" {
+		*f = ""
+		return nil
+	}
+	if b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*f = flexID(s)
+		return nil
+	}
+	// Only a genuine number token is accepted here -- an object or array in an
+	// id position is a field shape this client has not learned, and must fail
+	// the record rather than silently swallow the raw bytes as if they were
+	// an identifier.
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("flexID: %w", err)
+	}
+	*f = flexID(n.String())
+	return nil
+}
+
+func (f flexID) String() string { return string(f) }
+
 // caRecord is a deliberately loose view of an archived record.
 //
 // Field aliases are listed because the mirror may keep Civitai's own spelling
 // (modelId, baseModel) or a normalized one. Decoding into a tolerant struct
 // costs nothing and avoids an all-or-nothing bet on which it is.
 type caRecord struct {
-	ID        json.Number `json:"id"`
-	ModelID   json.Number `json:"modelId"`
-	ModelIDAlt json.Number `json:"model_id"`
-	VersionID json.Number `json:"versionId"`
-	VersionIDAlt json.Number `json:"modelVersionId"`
+	ID           flexID `json:"id"`
+	ModelID      flexID `json:"modelId"`
+	ModelIDAlt   flexID `json:"model_id"`
+	VersionID    flexID `json:"versionId"`
+	VersionIDAlt flexID `json:"modelVersionId"`
 
 	Name        string `json:"name"`
 	ModelName   string `json:"modelName"`
@@ -171,17 +206,17 @@ func (p *CivArchiveProvider) Search(ctx context.Context, q Query) (*Page, error)
 // is cheap; guessing wrong and reporting "no results" for a working service is
 // the failure worth avoiding.
 func decodeCivArchive(raw json.RawMessage) ([]caRecord, int, error) {
-	var asArray []caRecord
+	var asArray []json.RawMessage
 	if err := json.Unmarshal(raw, &asArray); err == nil && asArray != nil {
-		return asArray, 0, nil
+		return decodeRecords(asArray), 0, nil
 	}
 
 	var env struct {
-		Items    []caRecord `json:"items"`
-		Results  []caRecord `json:"results"`
-		Data     []caRecord `json:"data"`
-		Models   []caRecord `json:"models"`
-		Total    int        `json:"total"`
+		Items    []json.RawMessage `json:"items"`
+		Results  []json.RawMessage `json:"results"`
+		Data     []json.RawMessage `json:"data"`
+		Models   []json.RawMessage `json:"models"`
+		Total    int               `json:"total"`
 		Metadata struct {
 			TotalItems int `json:"totalItems"`
 		} `json:"metadata"`
@@ -194,12 +229,27 @@ func decodeCivArchive(raw json.RawMessage) ([]caRecord, int, error) {
 	if total == 0 {
 		total = env.Metadata.TotalItems
 	}
-	for _, list := range [][]caRecord{env.Items, env.Results, env.Data, env.Models} {
+	for _, list := range [][]json.RawMessage{env.Items, env.Results, env.Data, env.Models} {
 		if len(list) > 0 {
-			return list, total, nil
+			return decodeRecords(list), total, nil
 		}
 	}
 	return nil, total, nil
+}
+
+// decodeRecords decodes each element independently, so one record with a
+// field shape this client has not learned yet costs that one result rather
+// than turning a working page of results into none at all.
+func decodeRecords(raw []json.RawMessage) []caRecord {
+	out := make([]caRecord, 0, len(raw))
+	for _, r := range raw {
+		var rec caRecord
+		if err := json.Unmarshal(r, &rec); err != nil {
+			continue
+		}
+		out = append(out, rec)
+	}
+	return out
 }
 
 // caListing converts an archived record to a Listing.
@@ -344,7 +394,7 @@ func (p *CivArchiveProvider) client() *Client {
 	return NewClient()
 }
 
-func firstNonEmptyNum(vals ...json.Number) string {
+func firstNonEmptyNum(vals ...flexID) string {
 	for _, v := range vals {
 		s := v.String()
 		if s != "" && s != "0" {

@@ -393,3 +393,71 @@ func TestResolveFilesBudgetCountsNetworkSpend(t *testing.T) {
 		t.Fatalf("huggingface listing never got its hash: %+v", hf.Files)
 	}
 }
+
+// TestCivArchiveAcceptsStringIDs is the fix for a live failure: a real run
+// against civarchive.com returned `"v9208"` for an id field. json.Number
+// rejects any non-numeric token outright ("invalid number literal"), which
+// took the entire page down with it -- this is the exact reproduction.
+func TestCivArchiveAcceptsStringIDs(t *testing.T) {
+	body := `{"items":[
+      {"id": "v9208", "modelId": 42, "modelName": "String Version", "type": "LORA"},
+      {"id": 100, "modelId": 43, "modelName": "Numeric Id", "type": "LORA"}
+    ]}`
+	records, _, err := decodeCivArchive(json.RawMessage(body))
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want 2", len(records))
+	}
+	if records[0].ID.String() != "v9208" {
+		t.Errorf("string id = %q, want v9208", records[0].ID.String())
+	}
+	if records[1].ID.String() != "100" {
+		t.Errorf("numeric id = %q, want 100", records[1].ID.String())
+	}
+}
+
+// A single record with a field shape not yet learned must cost only that
+// record, not the whole page -- the "defensive decoding" the package claims.
+func TestCivArchiveOneBadRecordDoesNotBlankThePage(t *testing.T) {
+	body := `{"items":[
+      {"id": "ok-1", "modelId": 1, "modelName": "Fine"},
+      {"id": 2, "modelId": {"nested":"not a valid id shape"}, "modelName": "Broken"},
+      {"id": "ok-3", "modelId": 3, "modelName": "Also Fine"}
+    ]}`
+	records, _, err := decodeCivArchive(json.RawMessage(body))
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	// The malformed middle record is dropped; the two good ones survive.
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want 2 (one dropped, two kept): %+v", len(records), records)
+	}
+	names := []string{records[0].ModelName, records[1].ModelName}
+	if names[0] != "Fine" || names[1] != "Also Fine" {
+		t.Errorf("wrong records survived: %v", names)
+	}
+}
+
+// SearchAll must return a non-nil, empty slice when every provider errors, so
+// mm browse --json and the HTTP /api/browse response serialize as [] rather
+// than null.
+func TestSearchAllReturnsEmptySliceNotNil(t *testing.T) {
+	c := testClient()
+	c.CivitaiBase = "http://127.0.0.1:1" // nothing listens here
+	c.HuggingFaceBase = "http://127.0.0.1:1"
+	c.CivArchiveBase = "http://127.0.0.1:1"
+	reg := NewRegistry(c)
+
+	items, errs := reg.SearchAll(context.Background(), nil, Query{})
+	if items == nil {
+		t.Fatal("SearchAll returned a nil slice; JSON callers would see null instead of []")
+	}
+	if len(items) != 0 {
+		t.Fatalf("got %d items from unreachable providers", len(items))
+	}
+	if len(errs) == 0 {
+		t.Fatal("expected every provider to report an error")
+	}
+}
