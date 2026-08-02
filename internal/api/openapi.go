@@ -277,6 +277,29 @@ func openAPISpec(version string) []byte {
 					"Media", emptyResponse(),
 					pathParam("sha", "Model SHA256"), pathParam("image", "Image SHA256")),
 			},
+			"/api/comfy": get(
+				"Whether a ComfyUI is configured and answering, plus the workflow "+
+					"placeholders a template may use",
+				"Media", jsonResponse(object(nil))),
+			"/api/models/{sha}/previews/render": map[string]any{
+				"post": operation(
+					"Render a thumbnail with ComfyUI and attach it. Returns 202 with a "+
+						"job; a render is tens of seconds of someone else's GPU, so it is "+
+						"polled rather than awaited. The workflow must be ComfyUI's API "+
+						"format -- the editor format is refused with an explanation. The "+
+						"result is stored with a manual source, so enrichment cannot "+
+						"displace it.",
+					"Media", jsonResponse(object(nil)), pathParam("sha", "Model SHA256")),
+			},
+			"/api/renders": get("Tracked renders, newest first", "Media",
+				jsonResponse(object(nil))),
+			"/api/renders/{id}": map[string]any{
+				"delete": operation(
+					"Stop waiting on a render. Whatever ComfyUI already queued stays "+
+						"queued -- this app does not clear someone else's queue.",
+					"Media", jsonResponse(object(nil)), pathParam("id", "Render id")),
+			},
+
 			"/api/models/{sha}/previews/{image}/workflow": get(
 				"The ComfyUI workflow JSON this image carried, as a download", "Media",
 				jsonResponse(object(nil)),

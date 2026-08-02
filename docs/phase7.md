@@ -236,13 +236,107 @@ copy would double the blob store for nothing.
 backfills every preview ingested before this existed. Purely additive, safe to
 interrupt, and it reports the bytes saved.
 
-## What is not built
+## Rendering a thumbnail with ComfyUI
 
-**Submitting a workflow to ComfyUI to render a preview.** That is the one item
-that would make ComfyUI a *runtime dependency* rather than a file format we
-read, and it needs the topology settled first — the ComfyUI here is portable and
-also driven by SwarmUI, which owns its lifecycle — plus a queue/poll client and
-sane behaviour when ComfyUI is not running. Scoped, not started.
+The one feature that makes ComfyUI a **running dependency** rather than a file
+format this app reads. Everything above — the folder vocabulary, the workflow
+chunk inside a PNG, the output-folder picker — works whether ComfyUI is up or
+not. This does not, and the design says so out loud rather than hiding it behind
+a timeout.
+
+    GET    /api/comfy                            configured? answering? which version?
+    POST   /api/models/{sha}/previews/render     -> 202 {render}
+    GET    /api/renders
+    DELETE /api/renders/{id}
+
+Set the address in Settings and a **Render one** button appears on a model.
+Leave it blank and nothing is ever contacted.
+
+SwarmUI is deliberately not an option here. It can drive ComfyUI, but wiring
+this app through a second orchestrator that owns ComfyUI's lifecycle adds a
+failure surface for nothing: the graph, the queue and the output all live in
+ComfyUI either way.
+
+### Three calls, polled
+
+    POST /prompt                             queue a graph -> prompt_id
+    GET  /history/{prompt_id}                poll until outputs appear
+    GET  /view?filename=&subfolder=&type=    fetch the bytes
+
+Polling rather than the websocket ComfyUI also offers: a render is tens of
+seconds, a poll is one cheap GET, and a websocket would add a reconnect state
+machine to a path whose main failure mode is "ComfyUI is not running".
+
+A render is a **job**, the same shape downloads and scans use — registered
+synchronously so the ID goes back in the 202, run detached, polled, cancellable.
+One render per *model* (two renders of one model race to attach a preview and
+one is wasted GPU time) but many across models, because ComfyUI has its own
+queue and is better placed to order it than this app is. Cancelling stops this
+daemon waiting; whatever ComfyUI already queued stays queued, since clearing
+someone else's queue is not this app's call.
+
+### API format, not editor format
+
+ComfyUI accepts the *API* form of a graph. A PNG it exported carries both —
+`prompt` is the API form, `workflow` is the editor form — and only the former
+can be submitted back. Converting editor to API needs the node definitions of
+whatever custom nodes were installed, which this app does not have and should
+not pretend to.
+
+So an editor-format graph is detected locally and refused **before a job is
+registered**, with a sentence saying what to do (`Save (API Format)` in
+ComfyUI's dev mode). Catching it in the goroutine instead would hand back a 202
+and an ID, and a one-step mistake would look like a render that started and
+quietly died.
+
+### Filling the template
+
+One workflow is stored and reused for every model, so the model's own filename,
+its trigger words and a seed have to get in. Substitution happens on the JSON
+*text* before it is parsed, which lets a placeholder sit anywhere — inside a
+prompt string, as a whole field, in a node nobody anticipated.
+
+    {{model}}  {{checkpoint}}  {{name}}  {{base_model}}
+    {{triggers}}  {{prompt}}  {{negative}}  {{seed}}
+
+Text substitution into JSON is exactly how injection bugs happen, so every value
+is JSON-escaped first. A trigger word containing a quote stays a trigger word
+containing a quote; a value crafted to close the string and append a node
+cannot. `{{seed}}` is the exception — it emits a bare number, because a seed
+lands in a numeric field and quoting it would make ComfyUI reject the node.
+
+The seed is **derived from the model's hash** unless overridden, so re-rendering
+the same model gives the same picture. A thumbnail that changes on every
+regeneration makes "did my edit help?" unanswerable.
+
+`{{checkpoint}}` is configured, not guessed: a lora cannot render anything by
+itself, and there is no way for this app to know which checkpoint you have.
+
+A default workflow ships — checkpoint, lora, two CLIP encodes, sampler, decode,
+save — so the first render does not require a ComfyUI configuration exercise.
+It is a starting point, editable in Settings, and a test asserts the shipped
+default is queueable API format with every placeholder filled.
+
+### What comes back is still checked
+
+ComfyUI is a service the operator configured, not a trusted one. The fetched
+bytes are size-capped and **sniffed** before anything is stored — the same rule
+every other image in this app goes through — and the result is attached with a
+`manual` source, because a picture the user asked this app to make is a picture
+they chose, and enrichment must not displace it.
+
+Two failure modes get named rather than swallowed: ComfyUI's own complaint about
+a graph (which node rejected what) is passed through verbatim, and a workflow
+that completes without saving anything fails with "it needs a SaveImage node"
+instead of polling until the timeout.
+
+### `--no-remote`
+
+Rendering stays available. That flag exists to stop the daemon talking to
+*third parties* — Civitai, HuggingFace, CivArchive — and a ComfyUI address the
+operator typed into their own settings is not one; it is the same class of local
+resource as the output folder the picker already reads. Rendering is gated on
+`--writable` instead, because it creates a preview.
 
 ## Schema
 

@@ -1184,3 +1184,116 @@ a.ghost {
 .error-text {
   color: var(--danger);
 }
+
+/* --- ComfyUI rendering ----------------------------------------------------- */
+
+.render-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  padding: 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+.render-panel input[type='text'] {
+  flex: 1;
+  min-width: 14rem;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.55rem;
+  font-family: inherit;
+  font-size: 0.85rem;
+}
+
+.render-panel > button {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.7rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.render-panel > button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.render-panel > button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.render-panel .hint,
+.render-panel .error {
+  flex-basis: 100%;
+}
+
+.render-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+/* A render is someone else's GPU for tens of seconds, so its state is worth
+   colouring rather than leaving as one more grey word. */
+.render-state.queued,
+.render-state.running {
+  color: var(--accent);
+}
+
+.render-state.complete {
+  color: var(--text);
+}
+
+.render-state.failed {
+  color: var(--danger);
+}
+
+.render-state button {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.78rem;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.workflow-editor {
+  margin-top: 0.6rem;
+}
+
+.workflow-editor summary {
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.workflow-editor code {
+  background: var(--bg-sunken);
+  border-radius: 4px;
+  padding: 0 0.25rem;
+  margin-right: 0.25rem;
+}
+
+.workflow-editor textarea {
+  width: 100%;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.6rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  resize: vertical;
+}

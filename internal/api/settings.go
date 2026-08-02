@@ -21,7 +21,10 @@ func settingKeyAllowed(key string) bool {
 	case store.SettingLibraryFilters,
 		store.SettingDefaultDownloadRoot,
 		store.SettingFolderMap,
-		store.SettingComfyOutputDir:
+		store.SettingComfyOutputDir,
+		store.SettingComfyURL,
+		store.SettingComfyWorkflow,
+		store.SettingComfyCheckpoint:
 		return true
 	}
 	return false

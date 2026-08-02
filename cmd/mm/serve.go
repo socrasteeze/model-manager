@@ -13,6 +13,7 @@ import (
 
 	"github.com/socrasteeze/model-manager/internal/api"
 	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/comfy"
 	"github.com/socrasteeze/model-manager/internal/download"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/scan"
@@ -135,6 +136,16 @@ disk should not be reachable from a shared LAN without one.`)
 		})
 	}
 
+	// Rendering a thumbnail with ComfyUI creates a preview, so it follows the
+	// same --writable rule as every other write. Deliberately *not* gated on
+	// --no-remote: that flag stops the daemon talking to third parties, and a
+	// ComfyUI address the operator typed into their own settings is not one.
+	// With no address configured nothing is contacted at all.
+	var renders *comfy.Manager
+	if *writable {
+		renders = comfy.NewManager(nil, nil)
+	}
+
 	srv := api.New(api.Config{
 		Store:     st,
 		Blobs:     blobs,
@@ -144,6 +155,7 @@ disk should not be reachable from a shared LAN without one.`)
 		ReadOnly:  !*writable,
 		Origin:    originClient,
 		Scans:     scans,
+		Renders:   renders,
 		Downloads: downloads,
 	})
 

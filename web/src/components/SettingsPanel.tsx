@@ -15,9 +15,14 @@ import {
   putSetting,
   removeRoot,
   startScan,
+  SETTING_COMFY_CHECKPOINT,
   SETTING_COMFY_OUTPUT,
+  SETTING_COMFY_URL,
+  SETTING_COMFY_WORKFLOW,
   SETTING_DEFAULT_ROOT,
   SETTING_FOLDER_MAP,
+  comfyStatus,
+  type ComfyStatus,
   type FolderDefaults,
   type FolderMap,
   type Root,
@@ -50,6 +55,10 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
   const [folderMap, setFolderMap] = useState<FolderMap>({})
   const [defaultRoot, setDefaultRoot] = useState('')
   const [comfyOut, setComfyOut] = useState('')
+  const [comfyUrl, setComfyUrl] = useState('')
+  const [comfyCkpt, setComfyCkpt] = useState('')
+  const [workflow, setWorkflow] = useState('')
+  const [comfy, setComfy] = useState<ComfyStatus | null>(null)
   const [newPath, setNewPath] = useState('')
   const [suggestions, setSuggestions] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
@@ -70,8 +79,13 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
         setFolderMap((s[SETTING_FOLDER_MAP] as FolderMap) ?? {})
         setDefaultRoot((s[SETTING_DEFAULT_ROOT] as string) ?? '')
         setComfyOut((s[SETTING_COMFY_OUTPUT] as string) ?? '')
+        setComfyUrl((s[SETTING_COMFY_URL] as string) ?? '')
+        setComfyCkpt((s[SETTING_COMFY_CHECKPOINT] as string) ?? '')
+        const wf = s[SETTING_COMFY_WORKFLOW]
+        setWorkflow(typeof wf === 'string' ? wf : wf ? JSON.stringify(wf, null, 2) : '')
       })
       .catch(() => {})
+    comfyStatus().then(setComfy).catch(() => setComfy(null))
     detectInstalls()
       .then((d) => setSuggestions(d.model_roots ?? []))
       .catch(() => {
@@ -374,6 +388,95 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
           folder is readable, and a ComfyUI PNG's workflow is kept alongside the picture
           so it can be dragged back into ComfyUI.
         </p>
+      </section>
+
+      <section className="settings-block">
+        <h2>Render thumbnails with ComfyUI</h2>
+        <p className="hint">
+          The one feature that needs ComfyUI actually running. Everything else here —
+          the folder names, the workflow inside a PNG, the output folder above — works
+          whether it is up or not. Leave the address blank and nothing is ever
+          contacted.
+        </p>
+
+        <label className="setting-row">
+          <span>ComfyUI address</span>
+          <input
+            type="text"
+            placeholder="http://127.0.0.1:8188"
+            value={comfyUrl}
+            disabled={readOnly}
+            spellCheck={false}
+            onChange={(e) => setComfyUrl(e.target.value)}
+            onBlur={() =>
+              run(async () => {
+                await (comfyUrl.trim()
+                  ? putSetting(SETTING_COMFY_URL, comfyUrl.trim())
+                  : deleteSetting(SETTING_COMFY_URL))
+                setComfy(await comfyStatus())
+              })
+            }
+          />
+        </label>
+
+        <p className={`hint${comfy?.configured && !comfy.reachable ? ' error-text' : ''}`}>
+          {!comfy?.configured
+            ? 'Not configured.'
+            : comfy.reachable
+              ? `Connected — ComfyUI ${comfy.version || '(version unreported)'}.`
+              : comfy.error || 'Configured, but nothing is answering.'}
+        </p>
+
+        <label className="setting-row">
+          <span>Base checkpoint</span>
+          <input
+            type="text"
+            placeholder="sd_xl_base_1.0.safetensors"
+            value={comfyCkpt}
+            disabled={readOnly}
+            spellCheck={false}
+            onChange={(e) => setComfyCkpt(e.target.value)}
+            onBlur={() =>
+              run(() =>
+                comfyCkpt.trim()
+                  ? putSetting(SETTING_COMFY_CHECKPOINT, comfyCkpt.trim())
+                  : deleteSetting(SETTING_COMFY_CHECKPOINT),
+              )
+            }
+          />
+        </label>
+        <p className="hint">
+          A lora cannot render anything by itself, so a preview has to be generated on
+          top of a checkpoint. Name it exactly as ComfyUI lists it.
+        </p>
+
+        <details className="workflow-editor">
+          <summary>Workflow</summary>
+          <p className="hint">
+            ComfyUI&rsquo;s <strong>API format</strong>, not the editor format — in
+            ComfyUI, enable <em>Settings &rsaquo; Dev mode</em> and use{' '}
+            <em>Save (API Format)</em>. Placeholders:{' '}
+            {(comfy?.placeholders ?? []).map((p) => (
+              <code key={p}>{`{{${p}}}`}</code>
+            ))}
+            . Leave blank for the built-in default.
+          </p>
+          <textarea
+            rows={14}
+            spellCheck={false}
+            value={workflow}
+            disabled={readOnly}
+            placeholder="(built-in default)"
+            onChange={(e) => setWorkflow(e.target.value)}
+            onBlur={() =>
+              run(() =>
+                workflow.trim()
+                  ? putSetting(SETTING_COMFY_WORKFLOW, workflow)
+                  : deleteSetting(SETTING_COMFY_WORKFLOW),
+              )
+            }
+          />
+        </details>
       </section>
     </div>
   )

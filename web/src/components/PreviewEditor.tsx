@@ -1,15 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   attachGeneratedPreview,
+  cancelRender,
+  comfyStatus,
   config,
   deletePreview,
+  isRenderActive,
   listGenerated,
+  listRenders,
   previewURL,
+  renderPreview,
   reorderPreviews,
   uploadPreview,
   workflowURL,
+  type ComfyStatus,
   type GeneratedImage,
   type PreviewImage,
+  type RenderJob,
 } from '../api'
 
 /**
@@ -34,7 +41,42 @@ export function PreviewEditor({ sha, previews, onChanged }: {
   const [dragOver, setDragOver] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
 
+  const [comfy, setComfy] = useState<ComfyStatus | null>(null)
+  const [render, setRender] = useState<RenderJob | null>(null)
+  const [prompt, setPrompt] = useState('')
+  const [showRender, setShowRender] = useState(false)
+
   const editable = !config.readOnly
+
+  // Asked once per model, so the Render button is only offered when there is
+  // something listening. A button that fails after thirty seconds of waiting is
+  // worse than one that is not there.
+  useEffect(() => {
+    if (config.readOnly) return
+    comfyStatus().then(setComfy).catch(() => setComfy(null))
+  }, [sha])
+
+  // Poll only while this model has a render in flight. A finished render is a
+  // static record; polling one forever is a request per second for nothing.
+  useEffect(() => {
+    if (!render || !isRenderActive(render)) return
+    let stop = false
+    const timer = setInterval(() => {
+      listRenders()
+        .then((jobs) => {
+          if (stop) return
+          const mine = jobs.find((j) => j.id === render.id)
+          if (!mine) return
+          setRender(mine)
+          if (mine.state === 'complete') onChanged()
+        })
+        .catch(() => {})
+    }, 1500)
+    return () => {
+      stop = true
+      clearInterval(timer)
+    }
+  }, [render, onChanged])
 
   useEffect(() => {
     if (!picking) return
@@ -158,8 +200,66 @@ export function PreviewEditor({ sha, previews, onChanged }: {
             Upload an image
           </button>
           <button disabled={busy} onClick={() => setPicking((v) => !v)}>
-            {picking ? 'Close' : 'Pick a generated image'}
+            {picking ? 'Hide picker' : 'Pick a generated image'}
           </button>
+          {comfy?.configured && (
+            <button
+              disabled={busy || !comfy.reachable || (render ? isRenderActive(render) : false)}
+              title={
+                comfy.reachable
+                  ? 'Render a thumbnail with ComfyUI'
+                  : comfy.error || 'ComfyUI is not answering'
+              }
+              onClick={() => setShowRender((v) => !v)}
+            >
+              {showRender ? 'Hide render' : 'Render one'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {showRender && comfy?.configured && (
+        <div className="render-panel">
+          <input
+            type="text"
+            placeholder="Prompt (defaults to this model's trigger words)"
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            spellCheck={false}
+          />
+          <button
+            disabled={busy || (render ? isRenderActive(render) : false)}
+            onClick={() =>
+              run(async () => {
+                const job = await renderPreview(sha, prompt.trim() ? { prompt: prompt.trim() } : {})
+                setRender(job)
+              })
+            }
+          >
+            Render
+          </button>
+          {render && (
+            <span className={`render-state ${render.state}`}>
+              {render.state}
+              {isRenderActive(render) && (
+                <button
+                  onClick={() =>
+                    run(async () => {
+                      await cancelRender(render.id)
+                    })
+                  }
+                >
+                  cancel
+                </button>
+              )}
+            </span>
+          )}
+          {render?.error && <div className="error inline">{render.error}</div>}
+          {!comfy.reachable && (
+            <div className="hint">
+              {comfy.error ?? 'ComfyUI is not answering on ' + (comfy.url ?? 'the configured address')}
+            </div>
+          )}
         </div>
       )}
 

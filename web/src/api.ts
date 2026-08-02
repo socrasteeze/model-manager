@@ -566,6 +566,9 @@ export const SETTING_FILTERS = 'library.filters'
 export const SETTING_DEFAULT_ROOT = 'downloads.default_root'
 export const SETTING_FOLDER_MAP = 'downloads.folder_map'
 export const SETTING_COMFY_OUTPUT = 'thumbnails.comfy_output_dir'
+export const SETTING_COMFY_URL = 'thumbnails.comfy_url'
+export const SETTING_COMFY_WORKFLOW = 'thumbnails.comfy_workflow'
+export const SETTING_COMFY_CHECKPOINT = 'thumbnails.comfy_checkpoint'
 
 // A (root path -> type -> subfolder) map. One type has three different folder
 // names across the three tools, so the mapping can only be per (root, type).
@@ -650,3 +653,64 @@ export interface GeneratedImage {
 
 export const listGenerated = (limit = 60) =>
   request<{ dir: string; images: GeneratedImage[] }>(`/api/generated?limit=${limit}`)
+
+// --- rendering with ComfyUI ----------------------------------------------------
+//
+// The one feature that needs ComfyUI *running*. Everything else about ComfyUI
+// here -- the folder names, the workflow inside a PNG, the output folder --
+// works whether it is up or not, so the UI asks first and only offers the
+// button when there is something to ask.
+
+export interface ComfyStatus {
+  configured: boolean
+  reachable: boolean
+  url?: string
+  version?: string
+  error?: string
+  placeholders: string[]
+}
+
+export interface RenderJob {
+  id: string
+  sha256: string
+  state: 'queued' | 'running' | 'complete' | 'failed' | 'cancelled'
+  prompt_id?: string
+  started_at: string
+  ended_at?: string
+  image_sha256?: string
+  error?: string
+}
+
+export const isRenderActive = (j: RenderJob) => j.state === 'queued' || j.state === 'running'
+
+export const comfyStatus = () => request<ComfyStatus>('/api/comfy')
+
+export interface RenderRequest {
+  prompt?: string
+  negative?: string
+  checkpoint?: string
+  seed?: number
+  // A graph to run instead of the configured template. Must be ComfyUI's API
+  // format -- the editor format cannot be queued, and the server says so.
+  workflow?: unknown
+}
+
+// A 409 means this model is already rendering, which is not a failure from the
+// user's point of view: the job comes back so the UI can attach to it.
+export async function renderPreview(sha: string, req: RenderRequest = {}): Promise<RenderJob> {
+  const res = await fetch(`/api/models/${sha}/previews/render`, {
+    method: 'POST',
+    headers: headers(),
+    body: JSON.stringify(req),
+  })
+  const body = await res.json().catch(() => ({}))
+  if (res.status === 409 && body.render) return body.render as RenderJob
+  if (!res.ok) throw new Error(body.detail || body.error || res.statusText)
+  return body.render as RenderJob
+}
+
+export const listRenders = () =>
+  request<{ renders: RenderJob[] }>('/api/renders').then((r) => r.renders)
+
+export const cancelRender = (id: string) =>
+  request<{ status: string }>(`/api/renders/${encodeURIComponent(id)}`, { method: 'DELETE' })

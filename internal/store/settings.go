@@ -37,6 +37,20 @@ const (
 	// SettingComfyOutputDir is a ComfyUI output directory to offer generated
 	// images from when choosing a thumbnail.
 	SettingComfyOutputDir = "thumbnails.comfy_output_dir"
+
+	// SettingComfyURL is where a running ComfyUI is listening. Setting it is
+	// what turns rendering on: with no address there is no service to ask, and
+	// the app will not go looking for one.
+	SettingComfyURL = "thumbnails.comfy_url"
+
+	// SettingComfyWorkflow is the API-format workflow used to render a
+	// thumbnail, with {{placeholders}} filled per model.
+	SettingComfyWorkflow = "thumbnails.comfy_workflow"
+
+	// SettingComfyCheckpoint is the base checkpoint a lora preview renders on.
+	// A lora cannot render anything by itself and this app cannot guess which
+	// checkpoint you have, so it is configured rather than inferred.
+	SettingComfyCheckpoint = "thumbnails.comfy_checkpoint"
 )
 
 // ErrNoSetting means the key has never been written.

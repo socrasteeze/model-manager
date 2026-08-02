@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/comfy"
 	"github.com/socrasteeze/model-manager/internal/download"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/scan"
@@ -46,6 +47,11 @@ type Config struct {
 	// CLI, which is the right default for a daemon that is only meant to serve
 	// an index somebody else built.
 	Scans *scanjob.Manager
+
+	// Renders enables rendering a thumbnail with ComfyUI. Nil disables the
+	// render endpoints. Not gated on the remote-browsing switch: a ComfyUI
+	// address the operator configured is a local service, not a third party.
+	Renders *comfy.Manager
 
 	// Origin enables remote browsing and update checking. Nil disables both
 	// endpoints: those are the only ones that make outbound requests, so an
@@ -87,7 +93,14 @@ func New(cfg Config) *Server {
 			return ""
 		}
 	}
+	// A finished render is attached as a manual preview. Wired here rather than
+	// inside the comfy package so that package never imports the store or the
+	// blob store: it knows how to talk to ComfyUI and nothing about a library.
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), started: time.Now()}
+	if cfg.Renders != nil {
+		cfg.Renders.Attach = s.attachRendered
+		cfg.Renders.Dial = s.comfyClient
+	}
 	s.routes()
 	s.handler = cfg.Security.middleware(s.mux)
 	return s
@@ -113,6 +126,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/models/{sha}/previews/{image}", s.handleDeletePreview)
 	s.mux.HandleFunc("GET /api/models/{sha}/previews/{image}/workflow", s.handlePreviewWorkflow)
 	s.mux.HandleFunc("GET /api/generated", s.handleGeneratedImages)
+	s.mux.HandleFunc("POST /api/models/{sha}/previews/render", s.handleRenderPreview)
+	s.mux.HandleFunc("GET /api/renders", s.handleListRenders)
+	s.mux.HandleFunc("DELETE /api/renders/{id}", s.handleCancelRender)
+	s.mux.HandleFunc("GET /api/comfy", s.handleComfyStatus)
 
 	s.mux.HandleFunc("GET /api/models/{sha}/training", s.handleGetTraining)
 	s.mux.HandleFunc("PUT /api/models/{sha}/training", s.handlePutTraining)

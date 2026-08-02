@@ -37,7 +37,7 @@ All phases implemented. One static binary, no services, no configuration.
 | 4 | SSD tiering | [phase4-5](docs/phase4-5.md) |
 | 5 | Sidecar projection | [phase4-5](docs/phase4-5.md) |
 | 6 | Remote browsing across Civitai/CivArchive/HuggingFace, update checking, downloads from the UI | [phase6](docs/phase6.md) |
-| 7 | Managed directories, per-tool download folders, persistent filters, editable thumbnails | [phase7](docs/phase7.md) |
+| 7 | Managed directories, per-tool download folders, persistent filters, editable thumbnails, ComfyUI rendering | [phase7](docs/phase7.md) |
 
 ## Install
 
@@ -152,7 +152,9 @@ mm project --target stability-matrix         # write sidecars back out
   requests — `enrich`, `browse`, `updates`, and `get` — along with the daemon's
   `/api/browse`, `/api/updates` and `/api/remote-image` endpoints, which
   `mm serve --no-remote` disables outright. Everything else works with no
-  network at all.
+  network at all. Thumbnail rendering additionally talks to a ComfyUI address
+  you configure; with none set, nothing is contacted, and it is a local service
+  of yours rather than a third party, so `--no-remote` does not disable it.
 - **Binds `127.0.0.1` by default**, with a Host allowlist against DNS rebinding
   and no CORS wildcard. A token is required off-loopback.
 - **The database is a single file** you can copy, which is what makes the
