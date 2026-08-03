@@ -57,15 +57,9 @@ func Lint(template json.RawMessage) []Warning {
 	// a lora loader that rewiring can find, or through a {{model}} placeholder
 	// the author placed by hand. Neither means every thumbnail this workflow
 	// renders will be the same picture.
-	loadsModel := strings.Contains(text, "{{model}}")
+	loadsModel := hasPlaceholder(text, "model") || hasLoraLoader(nodes)
 	saves := false
 	for _, n := range nodes {
-		class := strings.ToLower(classOf(n))
-		if strings.Contains(class, "loraloader") {
-			if _, ok := inputsOf(n)["lora_name"]; ok {
-				loadsModel = true
-			}
-		}
 		// PreviewImage also surfaces in /history outputs, so either counts.
 		switch classOf(n) {
 		case "SaveImage", "PreviewImage":
@@ -74,12 +68,7 @@ func Lint(template json.RawMessage) []Warning {
 	}
 
 	if !loadsModel {
-		out = append(out, Warning{
-			Code: WarnNoLoraInput,
-			Message: "This workflow has no lora loader, so the model being previewed " +
-				"is never loaded and every thumbnail it renders will look the same. " +
-				"That is only correct if you are previewing checkpoints.",
-		})
+		out = append(out, Warning{Code: WarnNoLoraInput, Message: noLoraInputMessage})
 	}
 	if !saves {
 		out = append(out, Warning{
@@ -89,6 +78,45 @@ func Lint(template json.RawMessage) []Warning {
 		})
 	}
 	return out
+}
+
+// noLoraInputMessage is shared with Rewire's own no_lora_input warning, so the
+// two places that can raise this code say the same thing about it.
+const noLoraInputMessage = "This workflow has no lora loader, so the model being previewed " +
+	"is never loaded and every thumbnail it renders will look the same. " +
+	"That is only correct if you are previewing checkpoints."
+
+// isLoraLoader reports whether one node is a lora loader: LoraLoader,
+// LoraLoaderModelOnly, and the several community variants that all keep the
+// `lora_name` input under a class name containing "loraloader".
+func isLoraLoader(n map[string]any) bool {
+	if !strings.Contains(strings.ToLower(classOf(n)), "loraloader") {
+		return false
+	}
+	_, ok := inputsOf(n)["lora_name"]
+	return ok
+}
+
+// hasLoraLoader reports whether any node in the graph is a lora loader.
+func hasLoraLoader(nodes graphNodes) bool {
+	for _, n := range nodes {
+		if isLoraLoader(n) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPlaceholder reports whether template text contains a {{name}} placeholder,
+// tolerating the whitespace Fill itself tolerates ("{{ name }}" fills the same
+// as "{{name}}").
+func hasPlaceholder(text, name string) bool {
+	for _, m := range placeholder.FindAllStringSubmatch(text, -1) {
+		if len(m) > 1 && m[1] == name {
+			return true
+		}
+	}
+	return false
 }
 
 // MergeWarnings concatenates warning lists, keeping the first of each code.

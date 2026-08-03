@@ -31,7 +31,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # On a tag push, the default ref (whatever triggered the workflow) is
+      # already the tag. On workflow_dispatch it is the branch, which would
+      # build and publish whatever the branch has moved to since the tag was
+      # cut -- not what the tag names. Pinning the ref here is what makes the
+      # dist-drift check below, and the checksums after it, describe the
+      # commit that actually gets tagged and shipped, either way.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - uses: actions/setup-go@v5
         with:

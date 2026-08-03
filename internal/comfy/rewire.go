@@ -150,6 +150,7 @@ func Rewire(graph, template json.RawMessage, v Vars) (*RewireResult, error) {
 	}
 
 	loraFound := false
+	checkpointFound := false
 	for _, id := range nodeIDs(nodes) {
 		n := nodes[id]
 		inputs := inputsOf(n)
@@ -158,22 +159,28 @@ func Rewire(graph, template json.RawMessage, v Vars) (*RewireResult, error) {
 		}
 		class := classOf(n)
 
-		// A lora loader by any name: LoraLoader, LoraLoaderModelOnly, and the
-		// several community variants that all keep the `lora_name` input.
-		if v.Model != "" && strings.Contains(strings.ToLower(class), "loraloader") {
-			if _, ok := inputs["lora_name"]; ok {
-				set(id, class, "lora_name", v.Model)
-				loraFound = true
-			}
+		// Only the first lora loader is rewritten. A graph that deliberately
+		// chains two loras -- a style lora plus a detail enhancer -- is
+		// legitimate, and overwriting both with the previewed model would
+		// apply it twice through the chain instead of leaving the second
+		// alone.
+		if v.Model != "" && !loraFound && isLoraLoader(n) {
+			set(id, class, "lora_name", v.Model)
+			loraFound = true
 		}
 
 		// The checkpoint input differs per architecture -- ckpt_name for the
 		// SDXL family's CheckpointLoaderSimple, unet_name for the Flux family's
-		// UNETLoader -- so it is matched by input name rather than class.
-		if v.Checkpoint != "" {
+		// UNETLoader -- so it is matched by input name rather than class. Only
+		// the first is rewritten, for the same reason as the lora above: a
+		// base+refiner graph has two checkpoint loaders on purpose, and the
+		// refiner stage is supposed to load something else.
+		if v.Checkpoint != "" && !checkpointFound {
 			for _, field := range []string{"ckpt_name", "unet_name"} {
 				if _, ok := inputs[field]; ok {
 					set(id, class, field, v.Checkpoint)
+					checkpointFound = true
+					break
 				}
 			}
 		}
@@ -208,12 +215,7 @@ func Rewire(graph, template json.RawMessage, v Vars) (*RewireResult, error) {
 	}
 
 	if v.Model != "" && !loraFound {
-		res.Warnings = append(res.Warnings, Warning{
-			Code: WarnNoLoraInput,
-			Message: "This workflow has no lora loader, so the model being previewed " +
-				"is never loaded and every thumbnail it renders will look the same. " +
-				"That is only correct if you are previewing checkpoints.",
-		})
+		res.Warnings = append(res.Warnings, Warning{Code: WarnNoLoraInput, Message: noLoraInputMessage})
 	}
 
 	out, err := json.Marshal(nodes)
@@ -296,6 +298,25 @@ func promptText(v Vars) string {
 	return ""
 }
 
+// linkTarget reads the node id out of a ComfyUI link, ["<node id>", <output
+// index>]. Decoded with UseNumber (see decodeGraph), so an id ComfyUI itself
+// would also accept unquoted -- [4, 0] as well as ["4", 0] -- still resolves;
+// without this a graph written by a script rather than ComfyUI's own "Save
+// (API Format)" would silently break prompt tracing.
+func linkTarget(v any) string {
+	arr, ok := v.([]any)
+	if !ok || len(arr) == 0 {
+		return ""
+	}
+	switch id := arr[0].(type) {
+	case string:
+		return id
+	case json.Number:
+		return id.String()
+	}
+	return ""
+}
+
 // tracePrompts follows a sampler's positive and negative inputs to the node ids
 // that feed them.
 //
@@ -303,16 +324,6 @@ func promptText(v Vars) string {
 // -- some graphs use SamplerCustomAdvanced with a separate guider -- and is
 // handled by simply not touching the prompts rather than by guessing.
 func tracePrompts(nodes graphNodes) (positive, negative string) {
-	// A conditioning link is ["<node id>", <output index>].
-	linkTarget := func(v any) string {
-		arr, ok := v.([]any)
-		if !ok || len(arr) == 0 {
-			return ""
-		}
-		id, _ := arr[0].(string)
-		return id
-	}
-
 	for _, id := range nodeIDs(nodes) {
 		inputs := inputsOf(nodes[id])
 		if inputs == nil {
@@ -349,10 +360,8 @@ func resolveConditioning(nodes graphNodes, id string, depth int) string {
 	// Not a text encoder: something like FluxGuidance or ConditioningZeroOut
 	// wrapping one. Follow its conditioning input.
 	for _, field := range []string{"conditioning", "conditioning_1", "input"} {
-		if arr, ok := inputs[field].([]any); ok && len(arr) > 0 {
-			if next, ok := arr[0].(string); ok {
-				return resolveConditioning(nodes, next, depth+1)
-			}
+		if next := linkTarget(inputs[field]); next != "" {
+			return resolveConditioning(nodes, next, depth+1)
 		}
 	}
 	return ""

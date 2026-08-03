@@ -33,22 +33,7 @@ const maxWorkflowBytes = 8 << 20
 
 // workflowDir returns the configured directory of saved workflows.
 func (s *Server) workflowDir() (string, error) {
-	var configured string
-	ok, err := s.cfg.Store.GetSettingInto(store.SettingComfyWorkflowDir, &configured)
-	if err != nil || !ok || strings.TrimSpace(configured) == "" {
-		return "", errors.New("no workflow folder configured")
-	}
-	dir, err := filepath.Abs(strings.TrimSpace(configured))
-	if err != nil {
-		return "", err
-	}
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
-	}
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return "", fmt.Errorf("%s is not a directory", dir)
-	}
-	return dir, nil
+	return s.settingDir(store.SettingComfyWorkflowDir, "workflow folder")
 }
 
 // looksLikePath reports whether a slot value names a file rather than holding a
@@ -81,11 +66,16 @@ func (s *Server) loadWorkflowFile(name string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	var probe json.RawMessage
-	if err := json.Unmarshal(data, &probe); err != nil {
-		return nil, fmt.Errorf("%s is not valid JSON: %w", name, err)
+	// A template is not valid JSON on its own when it carries a bare numeric
+	// placeholder like "seed": {{seed}} -- Fill has to run before it parses.
+	// Checked again after a harmless fill, so a file that is simply broken is
+	// still caught without rejecting the placeholder form the docs describe.
+	if !json.Valid(data) {
+		if filled, ferr := comfy.Fill(json.RawMessage(data), comfy.Vars{}); ferr != nil || !json.Valid(filled) {
+			return nil, fmt.Errorf("%s is not valid JSON", name)
+		}
 	}
-	return probe, nil
+	return json.RawMessage(data), nil
 }
 
 // resolveWorkflowPath turns a slot value into a path on disk.
@@ -107,19 +97,11 @@ func (s *Server) resolveWorkflowPath(name string) (string, error) {
 	}
 	// Relative names are still confined to the folder, so a stored setting
 	// cannot walk out of it with `..`.
-	clean := cleanSubdir(name)
-	if clean == "" {
-		return "", fmt.Errorf("%q does not name a file", name)
+	resolved, err := confineToDir(dir, name, "workflow")
+	if err != nil {
+		return "", fmt.Errorf("%q: %w", name, err)
 	}
-	full := filepath.Join(dir, clean)
-	resolved := full
-	if r, err := filepath.EvalSymlinks(full); err == nil {
-		resolved = r
-	}
-	if !withinRoot(dir, resolved) {
-		return "", fmt.Errorf("%q is outside the workflow folder", name)
-	}
-	return full, nil
+	return resolved, nil
 }
 
 // workflowFile describes one saved workflow, and whether it can be used.
@@ -180,7 +162,15 @@ func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 			out = append(out, entry)
 			return nil
 		}
-		warnings := comfy.Lint(json.RawMessage(data))
+		// Linted after a harmless fill, same as loadWorkflowFile: a file using
+		// the documented bare {{seed}} placeholder is not valid JSON on its
+		// own, and would otherwise be marked "not API format" for using the
+		// feature exactly as documented.
+		lintTarget := json.RawMessage(data)
+		if filled, ferr := comfy.Fill(lintTarget, comfy.Vars{}); ferr == nil {
+			lintTarget = filled
+		}
+		warnings := comfy.Lint(lintTarget)
 		entry.APIFormat = true
 		for _, warn := range warnings {
 			if warn.Code == "not_api_format" {

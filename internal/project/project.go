@@ -409,13 +409,19 @@ func toStabilityMatrixType(t string) string {
 }
 
 func toSwarmArchitecture(base string) string {
-	switch base {
-	// Anima is grouped with the SDXL derivatives here because SwarmUI's
-	// architecture list has no entry of its own for it, and claiming an
-	// architecture SwarmUI does not know would be worse than the nearest true
-	// statement about what loads it.
-	case basemodel.SDXL, basemodel.Pony, basemodel.Illustrious,
-		basemodel.NoobAI, basemodel.Anima:
+	// Normalized first: a record may carry a raw provider spelling, or a value
+	// written by an older version of this app, and this switch only knows the
+	// canonical family names.
+	family := basemodel.Normalize(base)
+	// A derivative -- Pony, Illustrious, NoobAI, Anima, Krea -- inherits its
+	// parent's architecture here, because SwarmUI's architecture list has no
+	// entry of its own for any of them, and claiming one it does not know
+	// would be worse than the nearest true statement about what loads it.
+	if parent := basemodel.Parent(family); parent != "" {
+		family = parent
+	}
+	switch family {
+	case basemodel.SDXL:
 		return "stable-diffusion-xl-v1-base"
 	case basemodel.SD15:
 		return "stable-diffusion-v1"
@@ -423,8 +429,7 @@ func toSwarmArchitecture(base string) string {
 		return "stable-diffusion-v2"
 	case basemodel.SD3:
 		return "stable-diffusion-v3-medium"
-	case basemodel.Flux1, basemodel.Krea:
-		// Krea is Flux.1-derived, and SwarmUI has no separate label for it.
+	case basemodel.Flux1:
 		return "Flux.1-dev"
 	case basemodel.Flux2:
 		return "Flux.2-dev"

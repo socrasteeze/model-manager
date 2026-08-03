@@ -424,7 +424,10 @@ func mapArchitecture(v string) string {
 	case strings.Contains(l, "stable-diffusion-xl"):
 		return "SDXL"
 	case strings.Contains(l, "flux"):
-		return "Flux"
+		// Delegated rather than a hardcoded "Flux": this vocabulary has to
+		// agree with normalizeBaseModel and the path heuristic above, both of
+		// which distinguish Flux.1/Flux.2/Krea.
+		return basemodel.Normalize(v)
 	case strings.Contains(l, "stable-diffusion-v3"):
 		return "SD 3"
 	case strings.Contains(l, "stable-diffusion-v1"):

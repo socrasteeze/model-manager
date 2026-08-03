@@ -674,12 +674,6 @@ export interface ComfyStatus {
   base_models: string[]
 }
 
-// Workflows and checkpoints are stored per base-model family, keyed by family
-// name with "" as the default. An Illustrious lora and a FLUX.2 lora need
-// different loaders; a single graph would fail in ComfyUI, not degrade.
-export type WorkflowMap = Record<string, string>
-export type CheckpointMap = Record<string, string>
-
 export interface RenderJob {
   id: string
   sha256: string
@@ -693,7 +687,23 @@ export interface RenderJob {
 
 export const isRenderActive = (j: RenderJob) => j.state === 'queued' || j.state === 'running'
 
-export const comfyStatus = () => request<ComfyStatus>('/api/comfy')
+// The status probe is model-independent, but PreviewEditor asks it once per
+// model opened, and the endpoint behind it does a live 5-second-timeout ping
+// against ComfyUI. A short cache is what keeps browsing through a library from
+// re-pinging ComfyUI (or, when it is down, re-waiting out the timeout) on
+// every model opened.
+const COMFY_STATUS_TTL_MS = 15_000
+let comfyStatusCache: { at: number; value: Promise<ComfyStatus> } | null = null
+
+export const comfyStatus = () => {
+  const now = Date.now()
+  if (comfyStatusCache && now - comfyStatusCache.at < COMFY_STATUS_TTL_MS) {
+    return comfyStatusCache.value
+  }
+  const value = request<ComfyStatus>('/api/comfy')
+  comfyStatusCache = { at: now, value }
+  return value
+}
 
 export interface RenderRequest {
   prompt?: string
@@ -763,33 +773,11 @@ export const listWorkflows = () =>
 export const workflowStatus = () =>
   request<{ families: FamilyStatus[] }>('/api/comfy/status').then((r) => r.families)
 
-export interface Substitution {
-  node: string
-  class: string
-  input: string
-  was: unknown
-  now: unknown
-}
-
-export interface RenderPlan {
-  base_model: string
-  source: string
-  model: string
-  checkpoint?: string
-  seed: number
-  substitutions: Substitution[]
-  warnings: ComfyWarning[]
-  graph: unknown
-}
-
-// Everything a render would do, minus the render. Spending someone else's GPU
-// for thirty seconds to find out the graph names the wrong lora is a bad way to
-// learn that.
-export const planRender = (sha: string, req: RenderRequest = {}) =>
-  request<RenderPlan>(`/api/models/${sha}/previews/render/plan`, {
-    method: 'POST',
-    body: JSON.stringify(req),
-  })
+// The render-plan endpoint (POST /api/models/{sha}/previews/render/plan) has
+// no client here: it is only consumed by `mm comfy plan`. Add a typed wrapper
+// alongside whatever UI first needs it, rather than carrying types nothing
+// calls -- unused API surface type-checks fine right up until the response
+// shape actually changes.
 
 // A ComfyUI render carries the graph that made it. Adopting one is the shortest
 // path from "I have a workflow that works" to "the app uses it".

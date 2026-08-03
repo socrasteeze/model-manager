@@ -35,14 +35,31 @@ import (
 	"github.com/socrasteeze/model-manager/internal/thumb"
 )
 
-// comfyClient builds a client from the configured address.
+// comfyClient returns a client for the configured address, reusing the
+// previous one -- and its pooled connections -- as long as the address has
+// not changed. Every status probe and every render otherwise built a brand
+// new http.Client, which never reuses a TCP connection and strands the last
+// one's idle sockets for its timeout.
 func (s *Server) comfyClient() (*comfy.Client, error) {
 	var base string
 	ok, err := s.cfg.Store.GetSettingInto(store.SettingComfyURL, &base)
 	if err != nil || !ok || strings.TrimSpace(base) == "" {
 		return nil, comfy.ErrNotConfigured
 	}
-	return comfy.NewClient(base)
+	base = strings.TrimSpace(base)
+
+	s.comfyClientMu.Lock()
+	defer s.comfyClientMu.Unlock()
+	if s.comfyClientCache != nil && s.comfyClientURL == base {
+		return s.comfyClientCache, nil
+	}
+	client, err := comfy.NewClient(base)
+	if err != nil {
+		return nil, err
+	}
+	s.comfyClientCache = client
+	s.comfyClientURL = base
+	return client, nil
 }
 
 // workflowTemplate returns the workflow to use for a model of this base-model
@@ -61,6 +78,15 @@ func (s *Server) workflowTemplate(family string) (json.RawMessage, error) {
 	byFamily, fallback := s.workflowSettings()
 	if wf, ok := byFamily[family]; ok && len(wf) > 0 {
 		return s.resolveSlot(wf)
+	}
+	// A derivative with no slot of its own inherits its parent architecture's
+	// slot before falling all the way to the global default -- an Illustrious
+	// lora should pick up the SDXL workflow the user already configured,
+	// rather than the built-in one.
+	if parent := basemodel.Parent(family); parent != "" {
+		if wf, ok := byFamily[parent]; ok && len(wf) > 0 {
+			return s.resolveSlot(wf)
+		}
 	}
 	if len(fallback) > 0 {
 		return s.resolveSlot(fallback)
@@ -152,26 +178,12 @@ func looksLikeGraph(obj map[string]json.RawMessage) bool {
 //
 // Also per family, and for a blunter reason than the workflow: rendering an
 // Illustrious lora on a FLUX.2 checkpoint does not produce a worse picture, it
-// produces a ComfyUI error. Stored the same way -- a map, or a bare string
-// meaning "for everything".
+// produces a ComfyUI error. Decoding is shared with `mm comfy plan`, via
+// comfy.CheckpointForFamily, so the two agree on what a derivative family
+// inherits.
 func (s *Server) checkpointFor(family string) string {
-	var raw json.RawMessage
-	ok, _ := s.cfg.Store.GetSettingInto(store.SettingComfyCheckpoint, &raw)
-	if !ok || len(raw) == 0 {
-		return ""
-	}
-	var asString string
-	if err := json.Unmarshal(raw, &asString); err == nil {
-		return strings.TrimSpace(asString)
-	}
-	var byFamily map[string]string
-	if err := json.Unmarshal(raw, &byFamily); err != nil {
-		return ""
-	}
-	if c, ok := byFamily[family]; ok && strings.TrimSpace(c) != "" {
-		return strings.TrimSpace(c)
-	}
-	return strings.TrimSpace(byFamily[""])
+	raw, _ := s.cfg.Store.GetSetting(store.SettingComfyCheckpoint)
+	return comfy.CheckpointForFamily(raw, family)
 }
 
 type renderRequest struct {
@@ -297,12 +309,12 @@ func (s *Server) renderVars(sha string, detail *ModelDetail, req renderRequest) 
 	// absolute path this library records would not resolve there.
 	for _, p := range detail.Paths {
 		if p.Present {
-			v.Model = filenameOnly(p.Path)
+			v.Model = store.FilenameOf(p.Path)
 			break
 		}
 	}
 	if v.Model == "" && len(detail.Paths) > 0 {
-		v.Model = filenameOnly(detail.Paths[0].Path)
+		v.Model = store.FilenameOf(detail.Paths[0].Path)
 	}
 	if rec := detail.Record; rec != nil {
 		v.Name = rec.Name
@@ -316,13 +328,6 @@ func (s *Server) renderVars(sha string, detail *ModelDetail, req renderRequest) 
 		v.Checkpoint = s.checkpointFor(v.BaseModel)
 	}
 	return v
-}
-
-func filenameOnly(path string) string {
-	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
-		return path[i+1:]
-	}
-	return path
 }
 
 // handleRenderPlan handles POST /api/models/{sha}/previews/render/plan.
@@ -371,8 +376,12 @@ func (s *Server) handleRenderPlan(w http.ResponseWriter, r *http.Request) {
 		"checkpoint":    vars.Checkpoint,
 		"seed":          vars.Seed,
 		"substitutions": rewired.Substitutions,
-		"warnings":      comfy.MergeWarnings(rewired.Warnings, comfy.Lint(template)),
-		"graph":         graph,
+		// Linted against the graph that would actually be queued, not the raw
+		// template: a template using the documented bare {{seed}} placeholder
+		// is not valid JSON before Fill runs, and linting it directly would
+		// report a spurious "not API format" for a workflow that renders fine.
+		"warnings": comfy.MergeWarnings(rewired.Warnings, comfy.Lint(graph)),
+		"graph":    graph,
 	})
 }
 
@@ -548,8 +557,17 @@ func (s *Server) handleWorkflowStatus(w http.ResponseWriter, r *http.Request) {
 			out = append(out, st)
 			continue
 		}
+		// Filled with harmless values before linting, same reason as the plan
+		// endpoint: this is the raw template, and one using the documented
+		// bare {{seed}} placeholder is not valid JSON until Fill runs.
+		filled, err := comfy.Fill(graph, comfy.Vars{})
+		if err != nil {
+			st.Error = err.Error()
+			out = append(out, st)
+			continue
+		}
 		st.OK = true
-		st.Warnings = comfy.Lint(graph)
+		st.Warnings = comfy.Lint(filled)
 		for _, warn := range st.Warnings {
 			if warn.Code == "not_api_format" {
 				st.OK = false

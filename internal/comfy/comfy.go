@@ -174,9 +174,24 @@ func (c *Client) Wait(ctx context.Context, promptID string, interval time.Durati
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// A poll that cannot even reach ComfyUI is not "still rendering" -- it is
+	// disconnected, and no amount of waiting fixes that. Failing fast after a
+	// few consecutive misses turns "stuck at running for ten minutes" into an
+	// answer within a handful of seconds, without treating one dropped
+	// connection as fatal.
+	const maxConsecutiveErrors = 5
+	consecutiveErrors := 0
+
 	for {
 		var h map[string]history
-		if err := c.getJSON(ctx, "/history/"+url.PathEscape(promptID), &h); err == nil {
+		err := c.getJSON(ctx, "/history/"+url.PathEscape(promptID), &h)
+		if err != nil {
+			consecutiveErrors++
+			if consecutiveErrors >= maxConsecutiveErrors {
+				return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
+			}
+		} else {
+			consecutiveErrors = 0
 			if entry, ok := h[promptID]; ok {
 				var images []ImageRef
 				for _, out := range entry.Outputs {

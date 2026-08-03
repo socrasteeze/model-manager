@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/socrasteeze/model-manager/internal/basemodel"
 	"github.com/socrasteeze/model-manager/internal/provenance"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
@@ -449,8 +450,15 @@ func normalizeCivitaiBase(v string) string {
 	case strings.Contains(s, "sdxl") || strings.Contains(s, "sd xl"),
 		strings.Contains(s, "stable diffusion xl"):
 		return "SDXL"
+	// Krea and Flux.2 checked before the bare "flux" fallback, the same order
+	// internal/basemodel uses and for the same reason: Civitai's own labels
+	// for them ("Flux.2", "Flux.1 Krea") both contain "flux".
+	case strings.Contains(s, "krea"):
+		return basemodel.Krea
+	case strings.Contains(s, "flux 2") || strings.Contains(s, "flux2"):
+		return basemodel.Flux2
 	case strings.Contains(s, "flux"):
-		return "Flux"
+		return basemodel.Flux1
 	case strings.Contains(s, "sd 3") || strings.Contains(s, "sd3"),
 		strings.Contains(s, "stable diffusion 3"), strings.Contains(s, "stable diffusion v3"):
 		return "SD 3"

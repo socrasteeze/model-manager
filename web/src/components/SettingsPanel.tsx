@@ -581,7 +581,15 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
                       else if (m === 'file') next[family] = files[0]?.rel ?? ''
                       else next[family] = '{\n}'
                       setWorkflows(next)
-                      if (m === 'inherit') saveMap(SETTING_COMFY_WORKFLOW, next, run)
+                      // 'inline' is left unsaved on purpose -- the textarea's
+                      // own onBlur/onChange persists it once there is real
+                      // JSON to save, not the placeholder '{\n}'. 'inherit'
+                      // and 'file' (when a file was actually picked) both set
+                      // a complete, meaningful value here, so the dropdown
+                      // never shows a selection the server does not have.
+                      if (m === 'inherit' || (m === 'file' && files[0])) {
+                        saveMap(SETTING_COMFY_WORKFLOW, next, run)
+                      }
                     }}
                   >
                     {label}

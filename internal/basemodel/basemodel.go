@@ -78,14 +78,17 @@ var patterns = []struct {
 	// word boundary after the family name would miss every one of them.
 	{regexp.MustCompile(`(?i)\billustrious\w*`), Illustrious},
 	{regexp.MustCompile(`(?i)\bnoob\s*ai\w*`), NoobAI},
-	// `pony` stays strict: a lora called "ponytail" is about hair, not Pony
-	// Diffusion, and this is the one family token that is also an English word.
-	{regexp.MustCompile(`(?i)\bpony\b|\bponyxl\b|\bpdxl\b`), Pony},
+	// `pony` stays strict about the bare word: a lora called "ponytail" is
+	// about hair, not Pony Diffusion, and this is the one family token that is
+	// also an English word. A version suffix like "PonyV6" is unambiguous.
+	{regexp.MustCompile(`(?i)\bpony\b|\bponyxl\b|\bpdxl\b|\bpony\s*v\d+\b`), Pony},
 
 	// Flux family and derivatives, newest and most specific first.
 	{regexp.MustCompile(`(?i)\bkrea\d*\b`), Krea},
-	{regexp.MustCompile(`(?i)\bflux\s*\.?\s*2\b|\bflux2\b|\bklein\b`), Flux2},
-	{regexp.MustCompile(`(?i)\bflux\b|\bflux\s*\.?\s*1\b|\bflux1\b`), Flux1},
+	{regexp.MustCompile(`(?i)\bflux\s*2\b|\bflux2\b|\bklein\b`), Flux2},
+	// Trailing \w*, like illustrious/noobai above: "FluxDev" and "Flux1" are
+	// glued spellings a bare `\bflux\b` does not reach.
+	{regexp.MustCompile(`(?i)\bflux\w*`), Flux1},
 
 	// `anima` also stays strict, for the same reason as pony and more so:
 	// `\banima\w*` would swallow "animal" and "animation", and a lora named
@@ -93,13 +96,32 @@ var patterns = []struct {
 	{regexp.MustCompile(`(?i)\banima\b|\banima\s*2b\b|\banima2b\b`), Anima},
 
 	{regexp.MustCompile(`(?i)\bsdxl\b|\bsd\s*xl\b|^xl$|\bxl\b`), SDXL},
-	{regexp.MustCompile(`(?i)\bsd\s*3(\.\d)?\b|\bsd3\b`), SD3},
-	{regexp.MustCompile(`(?i)\bsd\s*1\.?5\b|\bsd1\b`), SD15},
-	{regexp.MustCompile(`(?i)\bsd\s*2(\.\d)?\b|\bsd2\b`), SD2},
+	{regexp.MustCompile(`(?i)\bsd\s*3\b|\bsd3\b`), SD3},
+	// \s* rather than \.? between the two digits: separators -- including a
+	// literal dot -- are already flattened to spaces below before these
+	// patterns run, so "sd 1.5" arrives here as "sd 1 5".
+	{regexp.MustCompile(`(?i)\bsd\s*1\s*5\b|\bsd1\b`), SD15},
+	{regexp.MustCompile(`(?i)\bsd\s*2\b|\bsd2\b`), SD2},
 
 	{regexp.MustCompile(`(?i)\bqwen\b`), Qwen},
-	{regexp.MustCompile(`(?i)\bwan\b`), Wan},
-	{regexp.MustCompile(`(?i)\bhunyuan\b`), Hunyuan},
+	// Trailing \d*: "Wan2.1" and "Wan2.2" are the spellings people actually
+	// use, and a bare `\bwan\b` does not reach past the glued version number.
+	{regexp.MustCompile(`(?i)\bwan\d*\b`), Wan},
+	{regexp.MustCompile(`(?i)\bhunyuan\w*`), Hunyuan},
+}
+
+// Parent returns the architecture a family renders with when it has no
+// workflow or checkpoint configuration of its own -- an SDXL derivative like
+// Illustrious needs the same graph shape as SDXL, and Krea is Flux.1-derived.
+// "" means family is not a derivative of a more commonly-configured one.
+func Parent(family string) string {
+	switch family {
+	case Pony, Illustrious, NoobAI, Anima:
+		return SDXL
+	case Krea:
+		return Flux1
+	}
+	return ""
 }
 
 // Normalize collapses the many spellings of one family onto a single name.

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -78,6 +79,14 @@ type Server struct {
 	// updateCheck is the single-flight latch for /api/updates; see
 	// handleUpdates for why concurrency there is capped at one.
 	updateCheck atomic.Bool
+
+	// comfyClientMu guards a cached comfy.Client, so a status probe or a
+	// render does not build a fresh http.Client -- and abandon the previous
+	// one's pooled connections -- on every single call. Rebuilt only when the
+	// configured address actually changes.
+	comfyClientMu    sync.Mutex
+	comfyClientCache *comfy.Client
+	comfyClientURL   string
 }
 
 // New builds a Server.

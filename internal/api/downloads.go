@@ -355,6 +355,53 @@ func withinRoot(root, candidate string) bool {
 	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
 }
 
+// settingDir resolves a stored setting to an existing, absolute,
+// symlink-resolved directory. Shared by every feature that reads a directory
+// the operator pointed the daemon at -- the ComfyUI output folder, the saved-
+// workflow folder -- so a hardening applied to how one of those is resolved
+// (e.g. rejecting a symlinked directory) reaches all of them.
+func (s *Server) settingDir(key, what string) (string, error) {
+	var configured string
+	ok, err := s.cfg.Store.GetSettingInto(key, &configured)
+	if err != nil || !ok || strings.TrimSpace(configured) == "" {
+		return "", fmt.Errorf("no %s configured", what)
+	}
+	dir, err := filepath.Abs(strings.TrimSpace(configured))
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", dir)
+	}
+	return dir, nil
+}
+
+// confineToDir turns a caller-supplied relative path into an absolute path
+// guaranteed to stay inside dir, even after symlinks are resolved. Shared by
+// every picker that reads a file inside an operator-configured directory on
+// behalf of a request -- the generated-image picker, the workflow-file picker
+// -- so a traversal hardening applied to one reaches the other. Returns the
+// resolved (post-symlink) path, which is the one that was actually checked.
+func confineToDir(dir, rel, what string) (string, error) {
+	clean := cleanSubdir(rel)
+	if clean == "" {
+		return "", fmt.Errorf("no %s named", what)
+	}
+	full := filepath.Join(dir, clean)
+	resolved := full
+	if r, err := filepath.EvalSymlinks(full); err == nil {
+		resolved = r
+	}
+	if !withinRoot(dir, resolved) {
+		return "", fmt.Errorf("%s is outside the configured folder", what)
+	}
+	return resolved, nil
+}
+
 func pathsEqual(a, b string) bool {
 	aa, err1 := filepath.Abs(a)
 	bb, err2 := filepath.Abs(b)

@@ -422,8 +422,8 @@ func TestFilenameOfHandlesBothSeparators(t *testing.T) {
 		"":                          "",
 	}
 	for in, want := range cases {
-		if got := filenameOf(in); got != want {
-			t.Errorf("filenameOf(%q) = %q, want %q", in, got, want)
+		if got := FilenameOf(in); got != want {
+			t.Errorf("FilenameOf(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

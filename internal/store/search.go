@@ -222,7 +222,7 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
 			_ = json.Unmarshal([]byte(*triggers), &h.TriggerWords)
 		}
 		h.Present = h.PathCount > 0
-		h.Filename = filenameOf(h.Path)
+		h.Filename = FilenameOf(h.Path)
 		results.Hits = append(results.Hits, h)
 	}
 	if err := rows.Err(); err != nil {
@@ -357,7 +357,7 @@ func (s *Store) reindexOne(sha string) error {
 	// Filenames are indexed with separators turned into spaces so that searching
 	// "cinematic" finds `cinematic_style_v2.safetensors`, which is how local
 	// models are actually named.
-	filename := strings.NewReplacer("_", " ", "-", " ", ".", " ").Replace(filenameOf(path))
+	filename := strings.NewReplacer("_", " ", "-", " ", ".", " ").Replace(FilenameOf(path))
 
 	_, err = s.db.Exec(`
         INSERT INTO model_search (sha256, name, description, base_model, type, trigger_words, tags, filename)
@@ -488,7 +488,12 @@ func (s *Store) FacetCounts(q SearchQuery) (*Facets, error) {
 	return f, nil
 }
 
-func filenameOf(path string) string {
+// FilenameOf returns the basename of a path recorded in the index. Exported
+// because it is the one place that gets this right for a path this app did not
+// necessarily write itself, and every other package that needs a model's
+// filename -- rendering it into a ComfyUI graph, among others -- should call
+// this rather than keep its own copy.
+func FilenameOf(path string) string {
 	if path == "" {
 		return ""
 	}

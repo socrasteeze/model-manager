@@ -19,7 +19,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -344,23 +343,7 @@ func (s *Server) handleAttachGenerated(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) comfyOutputDir() (string, error) {
-	var configured string
-	ok, err := s.cfg.Store.GetSettingInto(store.SettingComfyOutputDir, &configured)
-	if err != nil || !ok || strings.TrimSpace(configured) == "" {
-		return "", errors.New("no ComfyUI output folder configured")
-	}
-	dir, err := filepath.Abs(strings.TrimSpace(configured))
-	if err != nil {
-		return "", err
-	}
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = resolved
-	}
-	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() {
-		return "", fmt.Errorf("%s is not a directory", dir)
-	}
-	return dir, nil
+	return s.settingDir(store.SettingComfyOutputDir, "ComfyUI output folder")
 }
 
 // resolveGenerated turns a client-supplied relative path into an absolute one
@@ -374,17 +357,5 @@ func (s *Server) resolveGenerated(rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	clean := cleanSubdir(rel)
-	if clean == "" {
-		return "", errors.New("no image named")
-	}
-	full := filepath.Join(dir, clean)
-	resolved := full
-	if r, err := filepath.EvalSymlinks(full); err == nil {
-		resolved = r
-	}
-	if !withinRoot(dir, resolved) {
-		return "", errors.New("image is outside the configured output folder")
-	}
-	return resolved, nil
+	return confineToDir(dir, rel, "image")
 }

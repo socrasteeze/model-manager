@@ -19,6 +19,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/basemodel"
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/comfy"
+	"github.com/socrasteeze/model-manager/internal/store"
 	"github.com/socrasteeze/model-manager/internal/thumb"
 )
 
@@ -170,13 +171,26 @@ from what to what. Renders nothing and contacts nothing.`)
 		if err == nil {
 			for _, p := range paths {
 				if p.Present {
-					vars.Model = filepath.Base(p.Path)
+					vars.Model = store.FilenameOf(p.Path)
 					break
 				}
+			}
+			// Same fallback the render endpoint uses: no path is currently
+			// present, but the plan should still show what a render would
+			// name, not refuse to show anything.
+			if vars.Model == "" && len(paths) > 0 {
+				vars.Model = store.FilenameOf(paths[0].Path)
 			}
 		}
 		if vars.Model == "" {
 			return fmt.Errorf("comfy plan: no present file for %s", *sha)
+		}
+		// The per-family configured checkpoint, same as a real render would
+		// use, unless the caller passed --checkpoint.
+		if vars.Checkpoint == "" {
+			if raw, err := st.GetSetting(store.SettingComfyCheckpoint); err == nil {
+				vars.Checkpoint = comfy.CheckpointForFamily(raw, vars.BaseModel)
+			}
 		}
 	} else {
 		// Without a model, the plan still shows the shape -- which inputs would

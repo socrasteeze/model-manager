@@ -226,8 +226,12 @@ func civitaiBaseModels(normalized string) []string {
 		return []string{"Illustrious"}
 	case "noobai":
 		return []string{"NoobAI"}
-	case "flux":
+	case "flux", "flux.1", "flux1":
 		return []string{"Flux.1 D", "Flux.1 S"}
+	case "flux.2", "flux2":
+		return []string{"Flux.2"}
+	case "krea 2", "krea2", "krea":
+		return []string{"Flux.1 Krea"}
 	case "sd 1.5", "sd1.5":
 		return []string{"SD 1.5"}
 	case "sd 2.x", "sd2":

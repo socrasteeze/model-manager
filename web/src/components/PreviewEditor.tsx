@@ -66,9 +66,12 @@ export function PreviewEditor({ sha, previews, onChanged }: {
         .then((jobs) => {
           if (stop) return
           const mine = jobs.find((j) => j.id === render.id)
-          if (!mine) return
-          setRender(mine)
-          if (mine.state === 'complete') onChanged()
+          // The job is gone -- most likely the daemon restarted and its
+          // in-memory job table emptied. Clearing it here is what stops the
+          // poll and re-enables the button; leaving the stale "running" state
+          // in place would poll forever with no way to ever complete.
+          setRender(mine ?? null)
+          if (mine?.state === 'complete') onChanged()
         })
         .catch(() => {})
     }, 1500)
