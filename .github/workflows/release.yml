@@ -9,10 +9,10 @@ name: release
 #
 # Trigger it by pushing a tag:
 #
-#     git tag v0.1.0
-#     git push origin v0.1.0
+#     git tag -a v0.2.0 -m "..."
+#     git push origin v0.2.0
 #
-# or run it by hand from the Actions tab.
+# or run it by hand from the Actions tab, giving the tag as an input.
 
 on:
   push:
@@ -38,7 +38,35 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # The UI is committed in built form, so no Node toolchain is needed here.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # The binary serves the UI from internal/webui/dist, which is committed in
+      # built form -- so nothing but this step would notice a change to web/src
+      # that was never rebuilt, and the release would ship a stale interface
+      # silently, with every test still passing.
+      #
+      # The committed bundle is still what ships. This only asserts that a fresh
+      # build agrees with it, so the release is built from exactly what is in the
+      # tag rather than from something regenerated here.
+      - name: Check the committed UI is current
+        run: |
+          set -euo pipefail
+          npm --prefix web ci
+          npm --prefix web run build
+          # --porcelain rather than `git diff`, because Vite names assets by
+          # content hash: a changed bundle arrives as an *untracked* file, which
+          # a diff of tracked paths would not see.
+          DRIFT="$(git status --porcelain -- internal/webui/dist)"
+          if [ -n "$DRIFT" ]; then
+            echo "::error::internal/webui/dist is stale. Run 'npm --prefix web run build' and commit the result."
+            echo "$DRIFT"
+            exit 1
+          fi
+
       # Tests run before anything is published: a release that fails its own
       # test suite should never acquire a download link.
       - name: Vet and test
@@ -49,9 +77,13 @@ jobs:
       - name: Build every target
         env:
           CGO_ENABLED: 0
+          # On a tag push GITHUB_REF_NAME is the tag; on a manual dispatch it is
+          # the branch, which would stamp the binary "main". The input wins so
+          # `mm version` reports the release it actually belongs to either way.
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME:-dev}"
+          VERSION="${RELEASE_TAG:-dev}"
           mkdir -p dist
           # Pure Go with cgo off, so one runner cross-compiles the whole matrix.
           for target in linux/amd64 linux/arm64 windows/amd64 darwin/amd64 darwin/arm64; do
@@ -72,10 +104,31 @@ jobs:
           (cd dist && sha256sum * > SHA256SUMS.txt)
           ls -la dist
 
+      # A hand-written summary above the generated commit list. The commit list
+      # is accurate but does not answer the only question a reader has, which is
+      # whether they need to do anything on upgrade.
+      - name: Read the release notes for this tag
+        id: notes
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          FILE="docs/release-notes/${TAG}.md"
+          if [ -f "$FILE" ]; then
+            {
+              echo "body<<RELEASE_NOTES_EOF"
+              cat "$FILE"
+              echo "RELEASE_NOTES_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "no notes at $FILE; publishing with the generated list alone"
+            echo "body=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          body: ${{ steps.notes.outputs.body }}
           generate_release_notes: true
           files: |
             dist/*
