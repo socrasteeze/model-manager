@@ -34,6 +34,7 @@ import {
   type Root,
   type ScanJob,
 } from '../api'
+import { EnrichRunner } from './EnrichRunner'
 
 /**
  * Reads a setting that may be either a bare value ("use this for everything")
@@ -390,6 +391,32 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
             Rescan everything
           </button>
         </div>
+      </section>
+
+      <section className="settings-block">
+        <h2>Metadata and thumbnails from the origin</h2>
+        <p className="hint">
+          Looks every model up by content hash — an exact match, not a filename guess —
+          and merges the published name, base model, trigger words, description and
+          preview images.
+        </p>
+        <p className="hint">
+          Nothing you have edited is overwritten: a manual value wins, and where the
+          origin disagrees it is raised as a suggestion on that model instead. Blank
+          fields take the best answer available, and a thumbnail you chose stays first.
+          Responses are archived permanently, so a model later taken down keeps the
+          metadata this fetched.
+        </p>
+        <EnrichRunner
+          label="Refresh the whole library"
+          onFinished={onLibraryChanged}
+        />
+        <p className="hint">
+          Throttled to stay polite to the API, so a large library takes a while. Stopping
+          is safe — everything fetched is kept, and running again continues from there
+          rather than starting over. Models whose hash is still provisional are skipped;
+          run <code>mm verify --provisional</code> to confirm them first.
+        </p>
       </section>
 
       <section className="settings-block">

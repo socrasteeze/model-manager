@@ -14,6 +14,7 @@ import {
   type SearchHit,
 } from './api'
 import { BrowsePanel } from './components/BrowsePanel'
+import { EnrichRunner } from './components/EnrichRunner'
 import { FilterPanel } from './components/FilterPanel'
 import { ModelCard } from './components/ModelCard'
 import { ModelDetailPanel } from './components/ModelDetailPanel'
@@ -280,6 +281,23 @@ export function App() {
               <option value="added:desc">Recently added</option>
               <option value="recent:desc">Recently verified</option>
             </select>
+
+            {/* Sweeps everything the current filters select, not the loaded
+                page: only the filters are sent, and the server re-runs the
+                query. Pairs with the "needs attention" filter, which is
+                precisely the set worth pointing this at. */}
+            {total > 0 && (
+              <EnrichRunner
+                filters={filters}
+                expected={total}
+                label={`Refresh these ${total.toLocaleString()} from origin`}
+                className="inline"
+                onFinished={() => {
+                  runSearch(0, false)
+                  loadFacets()
+                }}
+              />
+            )}
           </div>
 
           {error && (

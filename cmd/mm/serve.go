@@ -15,6 +15,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/comfy"
 	"github.com/socrasteeze/model-manager/internal/download"
+	"github.com/socrasteeze/model-manager/internal/enrichjob"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/scan"
 	"github.com/socrasteeze/model-manager/internal/scanjob"
@@ -136,6 +137,20 @@ disk should not be reachable from a shared LAN without one.`)
 		})
 	}
 
+	// Enrichment writes metadata and previews, so it needs --writable, and it
+	// asks a third party, so it needs a client --no-remote has not withheld.
+	// Neither condition implies the other, hence both.
+	//
+	// Deliberately the *same* client the browse and update endpoints use, rather
+	// than one of its own. The throttle lives on the client, so sharing it means
+	// a sweep running while somebody browses stays within one request budget
+	// between them -- two clients would each be politely paced and together
+	// double the rate, which is how a sweep earns the rate limit that stops it.
+	var enrichment *enrichjob.Manager
+	if !*noRemote && *writable {
+		enrichment = enrichjob.New(st, blobs, func() *origin.Client { return originClient })
+	}
+
 	// Rendering a thumbnail with ComfyUI creates a preview, so it follows the
 	// same --writable rule as every other write. Deliberately *not* gated on
 	// --no-remote: that flag stops the daemon talking to third parties, and a
@@ -154,6 +169,7 @@ disk should not be reachable from a shared LAN without one.`)
 		Version:   version,
 		ReadOnly:  !*writable,
 		Origin:    originClient,
+		Enrich:    enrichment,
 		Scans:     scans,
 		Renders:   renders,
 		Downloads: downloads,

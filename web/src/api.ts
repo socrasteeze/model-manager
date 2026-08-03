@@ -222,14 +222,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>
 }
 
-export function searchModels(filters: Filters, offset = 0, limit = 60): Promise<SearchResults> {
+// filterParams serializes the filter set the server reads with searchQueryFrom.
+//
+// Written once because three callers need it -- the result list, the facet
+// counts beside it, and a bulk action over "the models I am looking at" -- and
+// the first two once drifted into describing different sets, so the sidebar
+// promised 400 loras next to a list of 12. Sort and paging are excluded: they
+// describe a page of results, not which models the filters select.
+export function filterParams(filters?: Filters): URLSearchParams {
   const params = new URLSearchParams()
+  if (!filters) return params
   if (filters.q) params.set('q', filters.q)
   for (const t of filters.type) params.append('type', t)
   for (const b of filters.base_model) params.append('base_model', b)
   for (const t of filters.tag) params.append('tag', t)
   if (filters.present !== undefined) params.set('present', String(filters.present))
   if (filters.needs_attention) params.set('needs_attention', 'true')
+  return params
+}
+
+export function searchModels(filters: Filters, offset = 0, limit = 60): Promise<SearchResults> {
+  const params = filterParams(filters)
   params.set('sort', filters.sort)
   params.set('order', filters.order)
   params.set('limit', String(limit))
@@ -434,19 +447,92 @@ export const getCandidates = (sha: string) => request<CandidateView[]>(`/api/mod
 // Facets take the same filters as the search, so the counts describe the
 // results rather than the whole library.
 export const getFacets = (filters?: Filters) => {
-  const params = new URLSearchParams()
-  if (filters) {
-    if (filters.q) params.set('q', filters.q)
-    for (const t of filters.type) params.append('type', t)
-    for (const b of filters.base_model) params.append('base_model', b)
-    for (const t of filters.tag) params.append('tag', t)
-    if (filters.present !== undefined) params.set('present', String(filters.present))
-    if (filters.needs_attention) params.set('needs_attention', 'true')
-  }
-  const qs = params.toString()
+  const qs = filterParams(filters).toString()
   return request<Facets>(qs ? `/api/facets?${qs}` : '/api/facets')
 }
 export const getSuggestions = () => request<Suggestion[]>('/api/suggestions')
+
+// --- enrichment ---------------------------------------------------------------
+//
+// Pulling metadata and previews from the origin. Nothing here decides what wins:
+// everything fetched is recorded as an ordinary origin-tier observation and
+// resolved server-side by the usual rules, so a value you typed still wins, a
+// blank field takes the best answer available, and a thumbnail you chose cannot
+// be displaced by a fetched one.
+
+export interface EnrichResult {
+  found: boolean
+  from_archive: boolean
+  images_added: number
+  previews_before: number
+  previews_after: number
+  errors: number
+}
+
+export interface EnrichJob {
+  id: string
+  scope: string
+  state: 'running' | 'complete' | 'failed' | 'cancelled'
+  started_at: string
+  finished_at?: string
+  models_total: number
+  models_done: number
+  fetched: number
+  cache_hits: number
+  found: number
+  missing: number
+  images: number
+  errors: number
+  last_error?: string
+  error?: string
+}
+
+export interface EnrichOptions {
+  /** Re-ask even when a response is already archived. */
+  refresh?: boolean
+  /** Fetch preview images too. Defaults to true server-side. */
+  images?: boolean
+  maxImages?: number
+  /** Stop after this many models. 0 or omitted means all of them. */
+  limit?: number
+}
+
+function enrichParams(opts: EnrichOptions | undefined, params: URLSearchParams): URLSearchParams {
+  if (!opts) return params
+  if (opts.refresh !== undefined) params.set('refresh', String(opts.refresh))
+  if (opts.images !== undefined) params.set('images', String(opts.images))
+  if (opts.maxImages !== undefined) params.set('max_images', String(opts.maxImages))
+  if (opts.limit) params.set('limit', String(opts.limit))
+  return params
+}
+
+/** Refresh one model. Synchronous: a single lookup is quicker than a job to poll. */
+export const enrichModel = (sha: string, opts?: EnrichOptions) => {
+  const qs = enrichParams(opts, new URLSearchParams()).toString()
+  return request<{ detail: ModelDetail; result: EnrichResult }>(
+    `/api/models/${sha}/enrich${qs ? `?${qs}` : ''}`,
+    { method: 'POST' },
+  )
+}
+
+/**
+ * Start a background sweep.
+ *
+ * With filters, the sweep covers every model matching them — not just the page
+ * on screen — because the server re-runs the same query rather than taking a
+ * list of hashes from the client.
+ */
+export const startEnrich = (filters?: Filters, opts?: EnrichOptions) => {
+  const params = enrichParams(opts, filterParams(filters))
+  params.set('scope', filters ? 'search' : 'all')
+  return request<EnrichJob>(`/api/enrich?${params}`, { method: 'POST' })
+}
+
+export const activeEnrich = () =>
+  request<{ job: EnrichJob | null; available: boolean }>('/api/enrich')
+
+export const cancelEnrich = (id: string) =>
+  request<void>(`/api/enrich/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
 export const updateModel = (sha: string, patch: Record<string, unknown>) =>
   request<ModelRecord>(`/api/models/${sha}`, { method: 'PATCH', body: JSON.stringify(patch) })

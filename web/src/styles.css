@@ -353,6 +353,44 @@ input:focus, select:focus, textarea:focus {
 .suggestion code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
 .suggestion-actions { display: flex; gap: 6px; margin-top: 6px; }
 
+/* --- enrichment ---------------------------------------------------------- */
+
+.refresh-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.refresh-origin { white-space: nowrap; }
+
+.enrich-runner {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 8px 0;
+}
+/* In the results header the runner sits beside the sort control, so it lays out
+   along the row rather than stacking and pushing the grid down. */
+.enrich-runner.inline {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.enrich-progress {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.enrich-progress progress {
+  width: 160px;
+  height: 6px;
+}
+
 /* --- files and identity -------------------------------------------------- */
 
 .path { padding: 6px 0; border-bottom: 1px solid var(--border); }

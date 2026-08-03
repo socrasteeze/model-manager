@@ -3,12 +3,14 @@ import {
   acceptSuggestion,
   config,
   dismissSuggestion,
+  enrichModel,
   formatBytes,
   getCandidates,
   getModel,
   setTags,
   updateModel,
   type CandidateView,
+  type EnrichResult,
   type ModelDetail,
 } from '../api'
 import { CopyButton } from './CopyButton'
@@ -27,6 +29,8 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
   const [showProvenance, setShowProvenance] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshNote, setRefreshNote] = useState<string | null>(null)
 
   const load = useCallback(() => {
     getModel(sha).then(setDetail).catch((e: Error) => setError(e.message))
@@ -37,8 +41,33 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
     setCandidates(null)
     setShowProvenance(false)
     setError(null)
+    setRefreshNote(null)
     load()
   }, [sha, load])
+
+  // Ask the origin about this model and merge what comes back.
+  //
+  // The server decides what wins, by the same rules every other ingest goes
+  // through: a value typed here is never overwritten (a contradicting origin
+  // becomes a suggestion above instead), a blank field takes the origin's
+  // answer, and a chosen thumbnail stays the thumbnail.
+  const refresh = async () => {
+    setRefreshing(true)
+    setRefreshNote(null)
+    setError(null)
+    try {
+      const { detail: fresh, result } = await enrichModel(sha)
+      setDetail(fresh)
+      // The provenance list is now stale, and it is cached until reopened.
+      setCandidates(null)
+      setRefreshNote(describeEnrich(result))
+      onChanged()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   useEffect(() => {
     if (!showProvenance || candidates) return
@@ -107,6 +136,18 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
       <PreviewEditor sha={sha} previews={detail.previews} onChanged={() => { void load(); onChanged() }} />
 
       <h2>{title}</h2>
+
+      {/* Offered only on a writable daemon with remote lookups enabled. Both
+          conditions are enforced server-side too; hiding the button as well
+          keeps it from being a thing you press to be told no. */}
+      {editable && (
+        <div className="refresh-row">
+          <button className="refresh-origin" disabled={refreshing} onClick={() => void refresh()}>
+            {refreshing ? 'Checking the origin…' : 'Refresh from origin'}
+          </button>
+          {refreshNote && <span className="source-note">{refreshNote}</span>}
+        </div>
+      )}
 
       {error && <div className="error inline">{error}</div>}
 
@@ -402,6 +443,25 @@ function TagEditor({
 
 function short(hash: string): string {
   return `${hash.slice(0, 8)}…${hash.slice(-6)}`
+}
+
+// describeEnrich says what the refresh actually did.
+//
+// Worth spelling out rather than silently re-rendering: with a manual value in
+// place the visible panel can be identical afterwards, and a button that appears
+// to do nothing reads as broken. "Not listed" is also a real answer, and the one
+// you get for a LoRA you trained yourself.
+function describeEnrich(r: EnrichResult): string {
+  if (!r.found) {
+    return r.errors > 0
+      ? 'The origin could not be reached.'
+      : 'Not listed at the origin — nothing to merge.'
+  }
+  const parts: string[] = []
+  const added = r.previews_after - r.previews_before
+  if (added > 0) parts.push(`${added} new image${added === 1 ? '' : 's'}`)
+  parts.push(r.from_archive ? 'merged from the archived response' : 'metadata merged')
+  return `${parts.join(', ')}. Values you edited were kept.`
 }
 
 function trimJSON(encoded: string): string {

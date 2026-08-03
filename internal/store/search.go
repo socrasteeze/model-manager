@@ -143,6 +143,41 @@ func filterSQL(q SearchQuery, skip string) (string, []any) {
 	return strings.Join(where, " AND "), args
 }
 
+// SearchSHAs returns every model matching a query, ignoring Limit and Offset.
+//
+// Search caps at 500 rows because it feeds a paged grid. A bulk action over "the
+// models I am currently looking at" needs the whole matching set, not the page,
+// and re-deriving that set from a different WHERE clause is how the facet counts
+// once ended up describing a different library than the results. So this shares
+// filterSQL and differs from Search only in what it selects and what it omits.
+//
+// Sorted by size descending to match the order enrichment already walks in, so a
+// bulk run that stops early has dealt with the models that cost the most first.
+func (s *Store) SearchSHAs(q SearchQuery) ([]string, error) {
+	whereSQL, args := filterSQL(q, "")
+
+	rows, err := s.db.Query(`
+        SELECT f.sha256
+          FROM model_file f
+          LEFT JOIN model_record r ON r.sha256 = f.sha256
+         WHERE `+whereSQL+`
+         ORDER BY f.size DESC, f.sha256 ASC`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing search matches: %w", err)
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return nil, err
+		}
+		out = append(out, sha)
+	}
+	return out, rows.Err()
+}
+
 // Search runs a query.
 func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
 	if q.Limit <= 0 {

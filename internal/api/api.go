@@ -20,6 +20,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/comfy"
 	"github.com/socrasteeze/model-manager/internal/download"
+	"github.com/socrasteeze/model-manager/internal/enrichjob"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/scan"
 	"github.com/socrasteeze/model-manager/internal/scanjob"
@@ -53,6 +54,12 @@ type Config struct {
 	// render endpoints. Not gated on the remote-browsing switch: a ComfyUI
 	// address the operator configured is a local service, not a third party.
 	Renders *comfy.Manager
+
+	// Enrich enables background metadata/preview sweeps from the UI. Nil leaves
+	// enrichment to `mm enrich`. A sweep writes to the library, so it follows the
+	// same --writable rule as scanning; it additionally needs Origin, since with
+	// no client there is nobody to ask.
+	Enrich *enrichjob.Manager
 
 	// Origin enables remote browsing and update checking. Nil disables both
 	// endpoints: those are the only ones that contact a *third party*, so an
@@ -153,6 +160,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/suggestions", s.handleSuggestions)
 	s.mux.HandleFunc("POST /api/suggestions/{id}/accept", s.handleAcceptSuggestion)
 	s.mux.HandleFunc("POST /api/suggestions/{id}/dismiss", s.handleDismissSuggestion)
+
+	s.mux.HandleFunc("POST /api/models/{sha}/enrich", s.handleEnrichModel)
+	s.mux.HandleFunc("POST /api/enrich", s.handleStartEnrich)
+	s.mux.HandleFunc("GET /api/enrich", s.handleEnrichStatus)
+	s.mux.HandleFunc("DELETE /api/enrich/{id}", s.handleCancelEnrich)
 
 	s.mux.HandleFunc("GET /api/browse", s.handleBrowse)
 	s.mux.HandleFunc("GET /api/updates", s.handleUpdates)

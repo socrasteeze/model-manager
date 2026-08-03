@@ -3,6 +3,7 @@
 /dist/
 /mm
 /mm.exe
+/mm-windows-amd64.exe
 
 # Local databases and scan artifacts
 *.db

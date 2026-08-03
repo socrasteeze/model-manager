@@ -45,9 +45,15 @@ rem ------------------------------------------------------- locate the binary
 
 cd /d "%~dp0"
 
+rem The release asset is published under its platform name, mm-windows-amd64.exe.
+rem Renaming it to mm.exe is one step in the README and an easy one to skip, so
+rem the download is accepted as-is rather than met with "could not find mm.exe"
+rem while the binary sits right there.
 set "MM_EXE="
 if exist "%~dp0mm.exe" set "MM_EXE=%~dp0mm.exe"
 if not defined MM_EXE if exist "%~dp0bin\mm.exe" set "MM_EXE=%~dp0bin\mm.exe"
+if not defined MM_EXE if exist "%~dp0mm-windows-amd64.exe" set "MM_EXE=%~dp0mm-windows-amd64.exe"
+if not defined MM_EXE if exist "%~dp0bin\mm-windows-amd64.exe" set "MM_EXE=%~dp0bin\mm-windows-amd64.exe"
 
 if not defined MM_EXE (
     echo.
@@ -57,6 +63,7 @@ if not defined MM_EXE (
     rem Program Files x86 folder, or a twice-unzipped "model-manager 1" copy.
     echo     "%~dp0mm.exe"
     echo     "%~dp0bin\mm.exe"
+    echo   ...and under the release name, mm-windows-amd64.exe, in both.
     echo.
     where go >nul 2>&1
     if errorlevel 1 (

@@ -292,6 +292,43 @@ func openAPISpec(version string) []byte {
 			"/api/updates": get(
 				"Models held for which the origin now publishes a newer version",
 				"Browse", jsonResponse(object(nil))),
+
+			// --- enrichment ------------------------------------------------
+			// Everything fetched is recorded as an ordinary origin-tier
+			// observation and resolved by the usual rules, so a manual value
+			// still wins and a manual preview still cannot be displaced. These
+			// endpoints add a trigger, not a new precedence.
+			"/api/models/{sha}/enrich": map[string]any{
+				"post": operation(
+					"Look this model up at the origin by hash and merge what comes back. "+
+						"Refuses with 409 when the hash is provisional: a hash bound by "+
+						"sampled probe could archive another file's metadata here.",
+					"Enrichment", jsonResponse(object(nil)),
+					pathParam("sha", "Model SHA256"),
+					queryParam("refresh", "Re-ask even if a response is already archived (default true)"),
+					queryParam("images", "Also fetch preview images (default true)"),
+					queryParam("max_images", "Preview images to keep (default 4)")),
+			},
+			"/api/enrich": map[string]any{
+				"get": operation("Progress of the running or most recent enrichment run",
+					"Enrichment", jsonResponse(object(nil))),
+				"post": operation(
+					"Start a background enrichment sweep. scope=all covers the library; "+
+						"scope=search takes the same filter parameters as /api/models and "+
+						"covers every model matching them, not just the page on screen.",
+					"Enrichment", jsonResponse(object(nil)),
+					queryParam("scope", `"all" or "search" (default "all")`),
+					queryParam("refresh", "Re-ask models that already have an archived response (default false)"),
+					queryParam("images", "Also fetch preview images (default true)"),
+					queryParam("max_images", "Preview images to keep per model (default 4)"),
+					queryParam("limit", "Stop after this many models (0 for all)")),
+			},
+			"/api/enrich/{id}": map[string]any{
+				"delete": operation(
+					"Stop the running sweep. Everything already archived stays archived, "+
+						"and re-running continues where this left off.",
+					"Enrichment", emptyResponse(), pathParam("id", "Enrichment run id")),
+			},
 			"/api/remote-image": get(
 				"Proxy a provider thumbnail. The page's CSP is img-src 'self', so a "+
 					"remote URL in an <img> is refused outright -- and loading one "+

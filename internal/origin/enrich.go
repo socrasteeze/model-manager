@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
@@ -21,6 +22,15 @@ type EnrichOptions struct {
 	// a rate-limited public API is several hours; being able to stop and resume
 	// is what makes it practical (§18: throttled, resumable batch runs).
 	Limit int
+
+	// Targets narrows the run to specific models. Empty means the whole library,
+	// which is what the CLI has always done.
+	//
+	// Still filtered through the same eligibility rule as a full run rather than
+	// trusted as given: a caller naming a hash does not make that hash confirmed,
+	// and the provisional check below is the thing standing between a sampled
+	// probe and somebody else's metadata archived under this file.
+	Targets []string
 
 	// Refresh re-queries models that already have a cached answer. Off by
 	// default: the archive is the point, and re-fetching is how you lose it.
@@ -65,7 +75,7 @@ func Enrich(ctx context.Context, st *store.Store, opts EnrichOptions) (*EnrichSt
 	cache := NewCache(st)
 	stats := &EnrichStats{}
 
-	targets, err := enrichTargets(st, opts.Limit)
+	targets, err := enrichTargets(st, opts.Limit, opts.Targets)
 	if err != nil {
 		return nil, err
 	}
@@ -221,22 +231,29 @@ func fetchImages(ctx context.Context, opts EnrichOptions, st *store.Store, sha s
 // Only models with a real, confirmed hash: a provisional path was bound by
 // sampled probe rather than a full read, and querying an origin with a hash we
 // are not sure of would archive someone else's metadata under this file (§10.1).
-func enrichTargets(st *store.Store, limit int) ([]string, error) {
-	query := `
+//
+// `want` narrows the result to a caller-supplied set. It is intersected in Go
+// rather than sent as a SQL `IN (...)`: a bulk run over a filtered library can
+// name five figures' worth of hashes, which is a bound parameter each and enough
+// to hit SQLite's host-parameter ceiling. The eligible set is materialized as a
+// slice either way, so intersecting costs one map and no extra query.
+func enrichTargets(st *store.Store, limit int, want []string) ([]string, error) {
+	// Applied after filtering, not in SQL: with a target set, LIMIT in the query
+	// would cap the *eligible* rows before the intersection and could return
+	// nothing at all while the named models sat just past the cut.
+	keep := make(map[string]bool, len(want))
+	for _, sha := range want {
+		keep[strings.ToLower(sha)] = true
+	}
+
+	rows, err := st.DB().Query(`
         SELECT f.sha256
           FROM model_file f
          WHERE EXISTS (
                    SELECT 1 FROM model_file_path p
                     WHERE p.sha256 = f.sha256 AND p.present = 1 AND p.provisional = 0
                )
-         ORDER BY f.size DESC`
-	args := []any{}
-	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
-	}
-
-	rows, err := st.DB().Query(query, args...)
+         ORDER BY f.size DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("origin: selecting enrichment targets: %w", err)
 	}
@@ -248,7 +265,13 @@ func enrichTargets(st *store.Store, limit int) ([]string, error) {
 		if err := rows.Scan(&sha); err != nil {
 			return nil, err
 		}
+		if len(keep) > 0 && !keep[strings.ToLower(sha)] {
+			continue
+		}
 		out = append(out, sha)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
 	}
 	return out, rows.Err()
 }

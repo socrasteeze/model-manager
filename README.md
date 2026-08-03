@@ -54,7 +54,8 @@ apply themselves.
 
 Download the binary for your platform from the
 [latest release](../../releases/latest) — one file, nothing to install. Windows
-users want `mm-windows-amd64.exe` (rename it to `mm.exe`) plus `start.bat`.
+users want `mm-windows-amd64.exe` plus `start.bat`. Renaming it to `mm.exe` is
+tidier, but `start.bat` finds it under either name.
 
 Verify it against `SHA256SUMS.txt` if you like — `mm version` should report the
 tag you downloaded. On Windows the executable is unsigned, so right-click →
