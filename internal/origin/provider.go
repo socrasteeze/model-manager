@@ -212,7 +212,7 @@ type LocalMatch struct {
 
 	// HaveVersionID is the version of this model already held, set when Status
 	// is MatchOutdated.
-	HaveVersionID string `json:"have_version_id,omitempty"`
+	HaveVersionID   string `json:"have_version_id,omitempty"`
 	HaveVersionName string `json:"have_version_name,omitempty"`
 }
 

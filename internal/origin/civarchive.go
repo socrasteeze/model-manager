@@ -109,8 +109,8 @@ type caRecord struct {
 	ModelName   string `json:"modelName"`
 	VersionName string `json:"versionName"`
 
-	Type      string `json:"type"`
-	BaseModel string `json:"baseModel"`
+	Type         string `json:"type"`
+	BaseModel    string `json:"baseModel"`
 	BaseModelAlt string `json:"base_model"`
 
 	Description string   `json:"description"`

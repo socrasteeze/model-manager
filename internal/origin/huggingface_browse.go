@@ -215,7 +215,7 @@ func hfListing(m hfSearchModel, site string) Listing {
 		Tags:        dedupeStrings(filterHFTags(append(append([]string{}, m.Tags...), m.CardData.Tags...))),
 	}
 	l.BaseModel = hfBaseModel(HFModel{
-		Tags:     m.Tags,
+		Tags: m.Tags,
 		CardData: struct {
 			License        string   `json:"license"`
 			BaseModel      any      `json:"base_model"`

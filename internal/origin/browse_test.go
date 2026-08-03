@@ -316,7 +316,6 @@ func repeatHex64(c byte) string {
 	return string(b)
 }
 
-
 // An owned model's OLDER versions must not badge as updates: Civitai returns
 // every version, and calling v1 an "update" to an owned v5 invites a downgrade.
 func TestOutdatedOnlyForNewerVersions(t *testing.T) {

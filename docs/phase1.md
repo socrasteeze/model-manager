@@ -126,6 +126,15 @@ unrecognized values verbatim, because that set is open-ended and a new
 architecture must not silently vanish. Pony and Illustrious are matched before
 SDXL, since their official names contain it.
 
+> **Both tables later moved out of this package.** They were duplicated here and
+> in the path heuristic, and the two copies drifted: one knew Flux and nothing
+> about Anima or Krea, the other knew "Anima 2B" and "Krea 2" and nothing about
+> how they related to anything. The same model could therefore bucket one way
+> from a sidecar and another from its path, which makes a base-model filter
+> quietly wrong. `internal/modeltype` and `internal/basemodel` are now the single
+> tables, shared by the sidecar, path and header passes. See
+> [phase7](phase7.md).
+
 ### Preview images
 
 App-managed and content-addressed (§18), not referenced in place — an in-place
@@ -224,6 +233,12 @@ React 18 / TypeScript / Vite, compiled to static assets and embedded via
 `embed.FS`. The built output is committed so `go build` works on a machine with
 no Node toolchain, which §3 requires of a distributable tool. `make ui` rebuilds
 it.
+
+Committing build output has one failure mode worth naming: an edit to `web/src`
+that was never rebuilt ships a binary serving a stale interface, silently, with
+every test still passing. The release workflow therefore rebuilds the UI and
+fails if the result differs from what is committed. The committed bundle is
+still what ships — the check only asserts a fresh build agrees with it.
 
 - Dark-first, because this sits beside uniformly dark generation UIs.
 - Facets sort by frequency, not alphabetically — in a 19k library the long tail

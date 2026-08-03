@@ -277,6 +277,77 @@ func openAPISpec(version string) []byte {
 					"Media", emptyResponse(),
 					pathParam("sha", "Model SHA256"), pathParam("image", "Image SHA256")),
 			},
+			// --- remote browsing (Phase 6) --------------------------------
+			"/api/browse": get(
+				"Search Civitai, CivArchive and HuggingFace, marking every result "+
+					"have / update / new by content hash rather than by filename",
+				"Browse", jsonResponse(object(nil)),
+				queryParam("q", "Search text"),
+				queryParam("provider", "Restrict to one provider (repeatable)"),
+				queryParam("type", "Model type"),
+				queryParam("base_model", "Base-model family"),
+				queryParam("sort", "Provider sort order"),
+				queryParam("page", "Page number"),
+				queryParam("nsfw", "Permit adult results")),
+			"/api/updates": get(
+				"Models held for which the origin now publishes a newer version",
+				"Browse", jsonResponse(object(nil))),
+			"/api/remote-image": get(
+				"Proxy a provider thumbnail. The page's CSP is img-src 'self', so a "+
+					"remote URL in an <img> is refused outright -- and loading one "+
+					"directly would disclose the viewer's address to a provider CDN on "+
+					"every search. Host-checked, size-capped and content-sniffed, "+
+					"because it is an outbound fetcher driven by a client-supplied URL.",
+				"Browse",
+				map[string]any{
+					"200": map[string]any{
+						"description": "Image bytes",
+						"content": map[string]any{
+							"image/*": map[string]any{"schema": map[string]any{"type": "string", "format": "binary"}},
+						},
+					},
+					"403": jsonRef("Host not allowed", "Error"),
+				},
+				queryParam("url", "Image URL at a known provider host")),
+
+			// --- downloads (Phase 6) ---------------------------------------
+			"/api/downloads": map[string]any{
+				"get": operation("Every tracked transfer, for progress polling", "Downloads",
+					jsonResponse(array(object(nil)))),
+				"post": operation(
+					"Start a transfer. Refused in read-only mode, refused for a source "+
+						"host that is not a known provider, and refused for a destination "+
+						"that is not a managed root -- the destination is never inferred "+
+						"from the URL or the filename. 409 with the running job's id when "+
+						"the same transfer is already in flight.",
+					"Downloads", jsonResponse(object(nil))),
+			},
+			"/api/downloads/{id}": map[string]any{
+				"delete": operation(
+					"Cancel a transfer in flight, or forget a terminal one. A partial "+
+						"file is kept either way, so the same id resumes rather than "+
+						"restarting.",
+					"Downloads", jsonResponse(object(nil)), pathParam("id", "Download id")),
+			},
+			"/api/downloads/roots": get(
+				"The directories a download may target. The client picks from this "+
+					"list; it is not trusted to invent one.",
+				"Downloads", jsonResponse(array(str("")))),
+
+			"/api/models/{sha}/previews/generated": map[string]any{
+				"post": operation(
+					"Attach an image from the configured ComfyUI output folder, named "+
+						"relative to it. Only that one directory is readable, and the path "+
+						"has traversal stripped and containment re-checked after symlinks.",
+					"Media", jsonResponse(object(nil)), pathParam("sha", "Model SHA256")),
+			},
+			"/api/models/{sha}/previews/order": map[string]any{
+				"put": operation(
+					"Set preview display order. Manual previews still sort ahead of "+
+						"fetched ones -- order within a tier is yours, the tiering is not.",
+					"Media", jsonResponse(object(nil)), pathParam("sha", "Model SHA256")),
+			},
+
 			"/api/comfy": get(
 				"Whether a ComfyUI is configured and answering, plus the workflow "+
 					"placeholders a template may use",

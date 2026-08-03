@@ -39,14 +39,26 @@ All phases implemented. One static binary, no services, no configuration.
 | 6 | Remote browsing across Civitai/CivArchive/HuggingFace, update checking, downloads from the UI | [phase6](docs/phase6.md) |
 | 7 | Managed directories, per-tool download folders, persistent filters, editable thumbnails, ComfyUI rendering | [phase7](docs/phase7.md) |
 
+Two guides sit outside the phase history:
+[ComfyUI workflows](docs/comfyui-workflows.md) for thumbnail rendering, and
+[native vs browser](docs/native-vs-browser.md) for why the UI opens in a browser
+and what that measurably costs.
+
 ## Install
+
+**Current release: [v0.2.0](../../releases/tag/v0.2.0)** — managed directories,
+per-tool download folders, persistent filters, editable thumbnails and ComfyUI
+rendering. See its [release notes](docs/release-notes/v0.2.0.md) for what to run
+after upgrading from v0.1.0; nothing is mandatory, since both schema migrations
+apply themselves.
 
 Download the binary for your platform from the
 [latest release](../../releases/latest) — one file, nothing to install. Windows
 users want `mm-windows-amd64.exe` (rename it to `mm.exe`) plus `start.bat`.
 
-Verify it against `SHA256SUMS.txt` if you like. On Windows the executable is
-unsigned, so right-click → Properties → **Unblock** before the first run.
+Verify it against `SHA256SUMS.txt` if you like — `mm version` should report the
+tag you downloaded. On Windows the executable is unsigned, so right-click →
+Properties → **Unblock** before the first run.
 
 ## Build
 
@@ -169,12 +181,18 @@ internal/store          SQLite schema, migrations, the only code that writes it
 internal/hashing        Dual-hash streaming pass and the sampled probe
 internal/modelformat    safetensors / GGUF framing; locates the weights region
 internal/scan           Root walking, cache tiers, per-device workers
+internal/scanjob        Scans as cancellable background jobs, for the daemon
 internal/provenance     Which of several competing values for a field wins
 internal/interpret      Stored headers and paths -> typed observations
 internal/ingest         Other tools' sidecars, read-only
+internal/modeltype      The one vocabulary of model types, and per-tool folders
+internal/basemodel      The one vocabulary of base-model families
 internal/origin         Civitai / CivArchive / HuggingFace: hash lookup, permanent
                         archive, remote search, and update detection
 internal/download       Resumable, verified, quarantined transfers
+internal/blobstore      Content-addressed store for preview images
+internal/thumb          Derived grid thumbnails; PNG workflow chunks
+internal/comfy          Queueing workflows to a running ComfyUI
 internal/link           Reflink / block-clone / symlink / hardlink / copy
 internal/view           Generated directory trees over the library
 internal/tier           Staging onto fast storage
@@ -182,4 +200,6 @@ internal/project        Master -> tool sidecar dialects
 internal/api            HTTP API and the §11 security baseline
 internal/webui          The embedded front-end (built assets committed)
 web/                    React / TypeScript / Vite source
+examples/workflows      Starter ComfyUI graph, copyable into ComfyUI
+docs/release-notes      Per-tag notes, published with the release
 ```

@@ -144,6 +144,13 @@ database being the single authority.
 A type-chip row sits under the top bar for one-click visibility toggling; the
 sidebar keeps the full facet lists.
 
+    GET    /api/settings
+    PUT    /api/settings/{key}      the key must be one this app knows
+    DELETE /api/settings/{key}      reset to the built-in default
+
+The key allowlist is not fussiness: an endpoint that accepts any key is an
+endpoint that lets a caller write unbounded rows into the master database.
+
 **A bug fixed on the way:** `FacetCounts` took no query, so the counts described
 the whole library while the list beside them described a filtered subset — the
 sidebar could say "lora 412" next to twelve results. It now takes the same
@@ -245,7 +252,11 @@ not. This does not, and the design says so out loud rather than hiding it behind
 a timeout.
 
     GET    /api/comfy                            configured? answering? which version?
+    GET    /api/comfy/workflows                  saved graphs, flagged by format
+    GET    /api/comfy/status                     per family: which graph, what is wrong
+    POST   /api/comfy/adopt                      pull a graph out of a rendered PNG
     POST   /api/models/{sha}/previews/render     -> 202 {render}
+    POST   /api/models/{sha}/previews/render/plan  what would be sent, without sending
     GET    /api/renders
     DELETE /api/renders/{id}
 

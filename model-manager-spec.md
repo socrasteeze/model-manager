@@ -4,7 +4,9 @@ Working name: TBD. Independent metadata authority and organization layer for a l
 library.
 
 Status: **all phases implemented** (see `docs/`). Revised 2026-07-27 following
-design review; built out 2026-07-29.
+design review; built out 2026-07-29; Phase 7 — managed directories, per-tool
+download folders, persistent filters, editable thumbnails and ComfyUI
+rendering — added 2026-08-02 and released as v0.2.0.
 
 > **What changed from v1.** Two things invalidated parts of the original spec. First, the app
 > is now intended to be **distributable** — good enough to offer publicly as a replacement for
@@ -235,8 +237,20 @@ than being deleted.
 
 1:1 with `sha256`, but conceptually separate — the file versus what it *is*.
 
-- `type` — checkpoint / LoRA / LyCORIS / VAE / embedding / controlnet / upscaler
-- `base_model` — SDXL / Flux / Krea 2 / Qwen / Wan / Anima 2B / etc.
+- `type` — checkpoint / LoRA / LyCORIS / VAE / embedding / controlnet / upscaler /
+  hypernetwork. A **closed** set (`internal/modeltype`): an unrecognised value
+  normalizes to empty rather than being passed through, because the type also
+  decides which subfolder a download lands in, and a folder invented from an
+  unvalidated string puts files where no tool will look.
+- `base_model` — SDXL / Illustrious / Pony / NoobAI / Anima / Flux.1 / Flux.2 /
+  Krea 2 / SD 1.5 / SD 2.x / SD 3 / Qwen / Wan / Hunyuan / etc. An **open** set
+  (`internal/basemodel`): an unrecognised value is kept verbatim, because a new
+  architecture ships every few months and dropping it would erase the one field
+  that says what a file can be used with.
+
+  Flux.1, Flux.2 and Krea are separate families rather than one "Flux" bucket.
+  They are three architectures needing three different ComfyUI graphs, so
+  collapsing them would make the field useless for the thing it now decides.
 - `name`, `version`, `description`
 - `trigger_words[]`
 - `recommended_weight`, `recommended_settings`

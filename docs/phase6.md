@@ -140,9 +140,16 @@ deployment the token exists for.
     GET    /api/downloads/roots
     GET    /api/downloads/destination?root=&type=
 
-These are the only endpoints that make outbound requests. `mm serve --no-remote`
-disables all three, which is how an operator keeps the daemon from talking to
-third parties without needing a firewall rule.
+These are the only endpoints that talk to a **third party**, and
+`mm serve --no-remote` disables them, which is how an operator keeps the daemon
+off the public internet without needing a firewall rule.
+
+Phase 7 added endpoints that make outbound requests to a *local* service — a
+ComfyUI address the operator typed into their own settings — for rendering
+thumbnails. Those are deliberately not covered by `--no-remote`, which exists to
+stop the daemon contacting Civitai, HuggingFace and CivArchive, not to stop it
+contacting a service of yours. With no address configured nothing is contacted
+at all. See [phase7](phase7.md).
 
 `/api/remote-image` proxies provider thumbnails. The page's CSP is
 `img-src 'self' data:`, so a remote URL in an `<img>` is refused outright and

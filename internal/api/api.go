@@ -54,9 +54,12 @@ type Config struct {
 	Renders *comfy.Manager
 
 	// Origin enables remote browsing and update checking. Nil disables both
-	// endpoints: those are the only ones that make outbound requests, so an
-	// operator who does not want the daemon talking to third parties gets that
-	// by leaving this unset rather than by firewall.
+	// endpoints: those are the only ones that contact a *third party*, so an
+	// operator who does not want the daemon talking to Civitai, HuggingFace or
+	// CivArchive gets that by leaving this unset rather than by firewall.
+	//
+	// Renders also makes outbound requests, but to a local ComfyUI the operator
+	// configured, which is a different thing and is gated separately.
 	Origin *origin.Client
 
 	// ReadOnly refuses every mutating request. Phase 1's contract is that the

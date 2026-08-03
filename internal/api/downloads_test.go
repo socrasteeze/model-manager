@@ -192,12 +192,12 @@ func TestDownloadRootsEndpointListsScannedRoots(t *testing.T) {
 
 func TestCleanSubdirStripsTraversal(t *testing.T) {
 	cases := map[string]string{
-		"loras":            "loras",
-		"loras/style":      filepath.Join("loras", "style"),
-		"../../etc":        "etc",
-		"./loras":          "loras",
-		"loras/../style":   filepath.Join("loras", "style"),
-		"":                 "",
+		"loras":             "loras",
+		"loras/style":       filepath.Join("loras", "style"),
+		"../../etc":         "etc",
+		"./loras":           "loras",
+		"loras/../style":    filepath.Join("loras", "style"),
+		"":                  "",
 		"a/b/../../../../c": filepath.Join("a", "b", "c"),
 	}
 	for in, want := range cases {
