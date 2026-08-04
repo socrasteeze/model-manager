@@ -5,6 +5,19 @@ list internal refactors with no visible effect.
 
 Every entry links to the full release notes for that version.
 
+## [Unreleased]
+
+### Fixed
+
+- The "Refresh from origin" button on a model showed even when the daemon
+  was started with `--no-remote`, and pressing it always failed. It now
+  hides itself in that case.
+- A 409 for a model whose file just is not on disk said its hash was
+  unconfirmed. It now says the file is not present, instead of sending you
+  to a command that cannot help.
+- Refreshing one model from its detail panel fetched the model's full
+  record twice. It now fetches it once.
+
 ## [v0.3.1](docs/release-notes/v0.3.1.md) — 2026-08-03
 
 ### Fixed

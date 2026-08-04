@@ -127,6 +127,9 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
 
   const rec = detail.record
   const editable = !config.readOnly
+  // Both conditions are enforced server-side too; checking them here as well
+  // keeps the button from being a thing you press only to be told no.
+  const canRefresh = editable && config.enrichAvailable
   const title = rec?.name || detail.paths[0]?.Path.split(/[/\\]/).pop() || sha.slice(0, 12)
 
   return (
@@ -137,10 +140,8 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
 
       <h2>{title}</h2>
 
-      {/* Offered only on a writable daemon with remote lookups enabled. Both
-          conditions are enforced server-side too; hiding the button as well
-          keeps it from being a thing you press to be told no. */}
-      {editable && (
+      {/* Offered only on a writable daemon with remote lookups enabled. */}
+      {canRefresh && (
         <div className="refresh-row">
           <button className="refresh-origin" disabled={refreshing} onClick={() => void refresh()}>
             {refreshing ? 'Checking the origin…' : 'Refresh from origin'}

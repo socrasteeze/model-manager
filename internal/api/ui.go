@@ -79,10 +79,17 @@ func (s *Server) injectToken(html []byte) []byte {
 	if s.cfg.Security.RequireToken {
 		token = s.cfg.Security.Token
 	}
+	// Calls the same check the enrichment endpoints themselves gate on, rather
+	// than restating its two conditions here -- a duplicated condition is
+	// exactly how this flag would drift out of step with what the server
+	// actually enforces the next time that check grows a third one.
+	enrichStatus, _, _ := s.enrichPrereq()
+
 	config := map[string]any{
-		"token":    token,
-		"readOnly": s.cfg.ReadOnly,
-		"version":  s.cfg.Version,
+		"token":           token,
+		"readOnly":        s.cfg.ReadOnly,
+		"version":         s.cfg.Version,
+		"enrichAvailable": enrichStatus == 0,
 	}
 	encoded, err := json.Marshal(config)
 	if err != nil {

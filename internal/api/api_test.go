@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"testing/fstest"
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/enrichjob"
+	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/provenance"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
@@ -489,6 +492,50 @@ func TestUITokenIsInjected(t *testing.T) {
 	}
 	if csp := w.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") {
 		t.Fatalf("CSP = %q", csp)
+	}
+}
+
+// The injected config is the only way the UI can know, before the user even
+// opens a model, whether pressing "Refresh from origin" would do anything --
+// otherwise the button is a thing you press only to be told the daemon was
+// started with --no-remote.
+func TestUIConfigReflectsEnrichAvailability(t *testing.T) {
+	ui := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<html><head></head><body></body></html>")},
+	}
+
+	cases := []struct {
+		name        string
+		mutate      func(*Config)
+		wantEnabled bool
+	}{
+		{"origin and enrich both configured", func(c *Config) {
+			c.Origin = &origin.Client{}
+			c.Enrich = &enrichjob.Manager{}
+		}, true},
+		{"no origin client (--no-remote)", func(c *Config) {
+			c.Origin = nil
+			c.Enrich = &enrichjob.Manager{}
+		}, false},
+		{"no enrich manager (read-only daemon)", func(c *Config) {
+			c.Origin = &origin.Client{}
+			c.Enrich = nil
+		}, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newServer(t, func(c *Config) {
+				c.UI = ui
+				tc.mutate(c)
+			})
+			w := do(s, "GET", "http://localhost/", "", nil)
+			body := w.Body.String()
+			want := fmt.Sprintf(`"enrichAvailable":%v`, tc.wantEnabled)
+			if !strings.Contains(body, want) {
+				t.Errorf("body does not contain %s: %s", want, body)
+			}
+		})
 	}
 }
 

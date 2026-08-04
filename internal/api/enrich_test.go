@@ -220,6 +220,96 @@ func TestEnrichModelRefusesAProvisionalHash(t *testing.T) {
 	if w.Code != http.StatusConflict {
 		t.Fatalf("provisional model enriched with %d, want 409: %s", w.Code, w.Body.String())
 	}
+	var body apiError
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body.Detail, "sampled probe") {
+		t.Errorf("detail = %q, want it to name the provisional hash as the cause", body.Detail)
+	}
+}
+
+// A confirmed hash whose file is simply not on disk right now (moved, deleted,
+// an unmounted drive) hits the same stats.Considered == 0 path a provisional
+// hash does, but "run mm verify --provisional" is the wrong advice for it --
+// the hash was never in question, the file just is not there.
+func TestEnrichModelDistinguishesAbsentFromProvisional(t *testing.T) {
+	s, st := enrichServer(t, 0)
+
+	run, err := st.BeginScanRun("/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertFileAndPath(
+		store.ModelFile{SHA256: "ccc", ProbeSHA256: "r", Size: 4096, Format: "safetensors"},
+		store.FilePath{SHA256: "ccc", Path: "/models/loras/gone.safetensors", Root: "/models",
+			Device: 1, Inode: 3, Size: 4096, MtimeNs: 1, ScanRunID: run},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(
+		`UPDATE model_file_path SET present = 0 WHERE sha256 = ?`, "ccc"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := do(s, "POST", "http://127.0.0.1/api/models/ccc/enrich", "", nil)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("absent model enriched with %d, want 409: %s", w.Code, w.Body.String())
+	}
+	var body apiError
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body.Detail, "sampled probe") || strings.Contains(body.Detail, "verify --provisional") {
+		t.Errorf("detail = %q, wrongly blames a provisional hash for a file that is simply absent", body.Detail)
+	}
+	if !strings.Contains(body.Error, "not present") {
+		t.Errorf("error = %q, want it to say the model is not present on disk", body.Error)
+	}
+}
+
+// A path that is BOTH absent and provisional -- a sampled-probe binding for a
+// file that has since gone missing -- must still report "not present", not
+// "not confirmed". "Run mm verify --provisional" cannot hash a file that
+// is not there, so blaming the hash would send the user to a command that
+// cannot help. This is also the fixture that actually exercises the `&&`:
+// TestEnrichModelRefusesAProvisionalHash only covers (present, provisional)
+// and TestEnrichModelDistinguishesAbsentFromProvisional only covers (absent,
+// non-provisional) -- neither alone can tell `p.Present && p.Provisional`
+// apart from `p.Present || p.Provisional` or from `p.Provisional` alone.
+func TestEnrichModelReportsAbsentEvenWhenTheAbsentPathIsProvisional(t *testing.T) {
+	s, st := enrichServer(t, 0)
+
+	run, err := st.BeginScanRun("/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertFileAndPath(
+		store.ModelFile{SHA256: "ddd", ProbeSHA256: "s", Size: 4096, Format: "safetensors"},
+		store.FilePath{SHA256: "ddd", Path: "/models/loras/gone-prov.safetensors", Root: "/models",
+			Device: 1, Inode: 4, Size: 4096, MtimeNs: 1, ScanRunID: run, Provisional: true},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(
+		`UPDATE model_file_path SET present = 0 WHERE sha256 = ?`, "ddd"); err != nil {
+		t.Fatal(err)
+	}
+
+	w := do(s, "POST", "http://127.0.0.1/api/models/ddd/enrich", "", nil)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("absent+provisional model enriched with %d, want 409: %s", w.Code, w.Body.String())
+	}
+	var body apiError
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(body.Detail, "sampled probe") || strings.Contains(body.Detail, "verify --provisional") {
+		t.Errorf("detail = %q, blamed the provisional flag on a path that is not even present", body.Detail)
+	}
+	if !strings.Contains(body.Error, "not present") {
+		t.Errorf("error = %q, want it to say the model is not present on disk", body.Error)
+	}
 }
 
 // Read-only is the boundary that stops anything acting on an unproven index, and
@@ -246,6 +336,34 @@ func TestEnrichUnavailableWithoutAnOriginClient(t *testing.T) {
 	w := do(s, "POST", "http://127.0.0.1/api/models/aaa/enrich", "", nil)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("enrich returned %d without an origin client, want 503", w.Code)
+	}
+}
+
+// GET /api/enrich's "available" field has to agree with what the two POST
+// endpoints actually enforce. serve.go currently only ever constructs an
+// enrichjob.Manager alongside an origin.Client (never one without the
+// other), which would make checking Enrich alone happen to work -- but nothing
+// enforces that pairing at the type level, so the status endpoint checks both
+// explicitly via the same enrichPrereq the POST endpoints use, rather than
+// relying on how one particular caller happens to wire the two together.
+func TestEnrichStatusUnavailableWithoutAnOriginClientEvenIfEnrichIsSet(t *testing.T) {
+	s := newServer(t, func(c *Config) {
+		c.Origin = nil
+		c.Enrich = &enrichjob.Manager{}
+	})
+
+	w := do(s, "GET", "http://127.0.0.1/api/enrich", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status endpoint returned %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Available bool `json:"available"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Available {
+		t.Error("available = true with no origin client, want false regardless of whether an Enrich manager exists")
 	}
 }
 

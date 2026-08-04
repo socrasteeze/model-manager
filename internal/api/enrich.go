@@ -75,13 +75,24 @@ func (s *Server) handleEnrichModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sha := strings.ToLower(r.PathValue("sha"))
-	before, err := s.modelDetail(sha)
+
+	// Existence plus a preview count is all this handler needs before the
+	// lookup runs. The full ModelDetail -- seven queries across paths,
+	// previews, tags, training and suggestions -- is only genuinely needed
+	// once, for the response body after enrichment has actually changed
+	// something.
+	exists, err := s.cfg.Store.ModelExists(sha)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "lookup failed", err.Error())
 		return
 	}
-	if before == nil {
+	if !exists {
 		writeError(w, http.StatusNotFound, "no model with that hash", sha)
+		return
+	}
+	previewsBefore, err := s.cfg.Store.PreviewImages(sha)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "lookup failed", err.Error())
 		return
 	}
 
@@ -106,14 +117,34 @@ func (s *Server) handleEnrichModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A model with a provisional path is skipped by Enrich's eligibility rule
-	// rather than looked up, because a hash bound by sampled probe could archive
-	// another file's metadata here. Silently reporting "not found on Civitai"
-	// would send the user hunting for a listing that was never queried.
+	// Enrich's eligibility rule skips a model rather than looking it up when
+	// Considered comes back 0, and there are two different reasons that can
+	// happen: a provisional path (bound by sampled probe, so a lookup could
+	// archive another file's metadata here) or a path that simply is not
+	// present on disk right now (moved, deleted, an unmounted drive). They
+	// need different messages -- "run mm verify" fixes the first and does
+	// nothing for the second.
 	if stats.Considered == 0 {
-		writeError(w, http.StatusConflict, "this model's hash is not confirmed",
-			"its path was bound by a sampled probe. Run `mm verify --provisional` to "+
-				"confirm the hash, then try again.")
+		paths, err := s.cfg.Store.PathsFor(sha)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "lookup failed", err.Error())
+			return
+		}
+		var provisional bool
+		for _, p := range paths {
+			if p.Present && p.Provisional {
+				provisional = true
+				break
+			}
+		}
+		if provisional {
+			writeError(w, http.StatusConflict, "this model's hash is not confirmed",
+				"its path was bound by a sampled probe. Run `mm verify --provisional` to "+
+					"confirm the hash, then try again.")
+		} else {
+			writeError(w, http.StatusConflict, "this model is not present on disk",
+				"every known path for it is marked absent, so there is nothing to look up right now.")
+		}
 		return
 	}
 
@@ -128,7 +159,7 @@ func (s *Server) handleEnrichModel(w http.ResponseWriter, r *http.Request) {
 			Found:          stats.Found > 0,
 			FromArchive:    stats.CacheHits > 0,
 			ImagesAdded:    stats.Images,
-			PreviewsBefore: len(before.Previews),
+			PreviewsBefore: len(previewsBefore),
 			PreviewsAfter:  len(after.Previews),
 			Errors:         stats.Errors,
 		},
@@ -217,7 +248,12 @@ func (s *Server) handleStartEnrich(w http.ResponseWriter, r *http.Request) {
 
 // handleEnrichStatus handles GET /api/enrich.
 func (s *Server) handleEnrichStatus(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.Enrich == nil {
+	// Goes through enrichPrereq rather than restating its condition, same
+	// reasoning as injectToken's enrichAvailable: the two POST endpoints
+	// already enforce both halves of it, and a poller's idea of "available"
+	// has to agree with what they will actually do, not just with whether a
+	// Manager happens to exist.
+	if status, _, _ := s.enrichPrereq(); status != 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"job": nil, "available": false})
 		return
 	}

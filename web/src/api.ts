@@ -9,6 +9,8 @@ export interface AppConfig {
   token: string
   readOnly: boolean
   version: string
+  /** Whether the daemon has a remote client and a writable enrichment manager. */
+  enrichAvailable: boolean
 }
 
 declare global {
@@ -21,6 +23,7 @@ export const config: AppConfig = window.__MM__ ?? {
   token: '',
   readOnly: true,
   version: 'dev',
+  enrichAvailable: false,
 }
 
 export interface SearchHit {

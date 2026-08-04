@@ -448,6 +448,23 @@ func (s *Store) GetModelRecord(sha string) (*ModelRecord, error) {
 	return &rec, nil
 }
 
+// ModelExists reports whether sha256 is a known model file.
+//
+// A cheap existence check against model_file directly, for callers that only
+// need a yes/no answer and would otherwise pay for GetModelRecord's several
+// joins (or worse, the full multi-query ModelDetail) just to find out.
+func (s *Store) ModelExists(sha string) (bool, error) {
+	var exists int
+	err := s.db.QueryRow(`SELECT 1 FROM model_file WHERE sha256 = ?`, sha).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: checking %s exists: %w", sha, err)
+	}
+	return true, nil
+}
+
 // ResolveAll re-materializes every model that has candidates. Used after a
 // resolution-rule change or a bulk ingest.
 func (s *Store) ResolveAll(progress func(done int)) (int, error) {
