@@ -143,6 +143,8 @@ export function EnrichRunner({ filters, expected, label, className, onFinished }
           {job.missing.toLocaleString()} not listed
           {job.images > 0 && `, ${job.images.toLocaleString()} images`}
           {job.errors > 0 && `, ${job.errors.toLocaleString()} errors`}.
+          {job.rate_limited &&
+            ' The origin rejected a request during this run — run it again to make sure everything was covered.'}
         </span>
       )}
 

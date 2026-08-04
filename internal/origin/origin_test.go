@@ -484,3 +484,148 @@ func TestEnrichLimitBoundsARun(t *testing.T) {
 		t.Fatalf("considered %d, want the limit of 2", stats.Considered)
 	}
 }
+
+// A poller reading progress mid-run (or after a stop) has to be told the truth
+// about how far the run actually got, not a number that always equals the
+// full eligible set regardless of when the run stopped.
+func TestEnrichReportsTruePartialProgressOnCancellation(t *testing.T) {
+	st := testStore(t)
+	for _, sha := range []string{"a1", "b2", "c3"} {
+		seed(t, st, sha, false)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var requests int32
+	c := fakeCivitai(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&requests, 1) == 1 {
+			// Cancel once the first model's lookup has completed, so the next
+			// iteration's ctx.Err() check breaks the loop before it starts a
+			// second one.
+			cancel()
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	var calls []struct{ done, total int }
+	stats, err := Enrich(ctx, st, EnrichOptions{
+		Client: c,
+		Progress: func(done, total int, _ EnrichStats) {
+			calls = append(calls, struct{ done, total int }{done, total})
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Considered != 3 {
+		t.Fatalf("considered = %d, want 3 -- cancellation must not change what was eligible", stats.Considered)
+	}
+	if requests != 1 {
+		t.Fatalf("the provider was asked about %d models, want exactly 1 before cancellation stopped the loop", requests)
+	}
+	if len(calls) == 0 {
+		t.Fatal("Progress was never called")
+	}
+
+	last := calls[len(calls)-1]
+	if last.done == last.total {
+		t.Fatalf("final progress reported %d/%d (100%%) for a run that only reached 1 of 3 models", last.done, last.total)
+	}
+	if last.done != 1 || last.total != 3 {
+		t.Fatalf("final progress = %d/%d, want 1/3", last.done, last.total)
+	}
+}
+
+// A rate-limited stop is not a failure and not a cancellation, so it returns a
+// nil error with a normal-looking context -- the only place the truth survives
+// is EnrichStats.RateLimited, and it has to reach a live poller through the
+// Progress snapshot, not only the value Enrich eventually returns.
+func TestEnrichSetsRateLimitedAndReportsWhatWasAttempted(t *testing.T) {
+	st := testStore(t)
+	for _, sha := range []string{"a1", "b2"} {
+		seed(t, st, sha, false)
+	}
+	c := fakeCivitai(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	c.MaxRetries = 1
+	oldBackoff := backoffFn
+	backoffFn = func(int) time.Duration { return time.Millisecond }
+	t.Cleanup(func() { backoffFn = oldBackoff })
+
+	var last struct {
+		done, total int
+		stats       EnrichStats
+	}
+	stats, err := Enrich(context.Background(), st, EnrichOptions{
+		Client: c,
+		Progress: func(done, total int, s EnrichStats) {
+			last.done, last.total, last.stats = done, total, s
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stats.RateLimited {
+		t.Fatal("stats.RateLimited is false after the provider rate-limited the run")
+	}
+	if stats.Errors != 1 {
+		t.Fatalf("errors = %d, want exactly 1 (the model that hit the rate limit)", stats.Errors)
+	}
+	if stats.Considered != 2 {
+		t.Fatalf("considered = %d, want 2 -- Considered is eligibility, not attempts, and must not shrink", stats.Considered)
+	}
+	if last.done != 1 || last.total != 2 {
+		t.Fatalf("final progress = %d/%d, want 1/2 -- the second model was never reached", last.done, last.total)
+	}
+	if !last.stats.RateLimited {
+		t.Error("the final Progress call's stats snapshot does not carry RateLimited -- a live poller would never see it")
+	}
+}
+
+// The single-model refresh path (Targets with one hash, Limit unset) must not
+// pay for a full-library scan to answer a question about one row.
+func TestEnrichTargetsByHashPathMatchesTheFullScan(t *testing.T) {
+	st := testStore(t)
+	seed(t, st, "aaa", false)
+	seed(t, st, "bbb", false)
+	seed(t, st, "prov", true) // provisional: never eligible either way
+
+	// Below maxTargetParams: takes the IN(...) fast path.
+	out, err := enrichTargets(st, 0, []string{"aaa"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0] != "aaa" {
+		t.Fatalf("enrichTargets(want=[aaa]) = %v, want [aaa]", out)
+	}
+
+	// A provisional hash must be excluded even when explicitly named -- the
+	// eligibility rule is not something a caller-supplied Targets list can
+	// bypass.
+	out, err = enrichTargets(st, 0, []string{"prov"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("enrichTargets(want=[prov]) = %v, want none: a provisional hash must stay excluded", out)
+	}
+
+	// Naming two hashes returns both, still ordered by size descending, and a
+	// hash not in the library is silently absent rather than an error.
+	out, err = enrichTargets(st, 0, []string{"aaa", "bbb", "does-not-exist"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("enrichTargets(want=[aaa,bbb,x]) = %v, want 2 matches", out)
+	}
+
+	// The untargeted full-scan path (want empty) still sees everything eligible.
+	out, err = enrichTargets(st, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("enrichTargets(want=nil) = %v, want both eligible models", out)
+	}
+}

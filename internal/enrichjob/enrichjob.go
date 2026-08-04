@@ -83,6 +83,16 @@ type Job struct {
 	Images    int `json:"images"`
 	Errors    int `json:"errors"`
 
+	// RateLimited means the provider rejected a request during this run. The
+	// run still ends in StateComplete -- it was not cancelled and nothing
+	// failed -- so without this flag it reads exactly like an exhaustive
+	// sweep, even though the model that got rejected has no result recorded
+	// for it (ModelsDone can still equal ModelsTotal: the rejection can land
+	// on the last eligible model as easily as an earlier one). Set live, not
+	// just at the end: it is copied from origin.EnrichStats on every Progress
+	// tick, the same way the other counters below are.
+	RateLimited bool `json:"rate_limited"`
+
 	// LastError is the most recent per-model failure. Kept because the errors
 	// counter alone tells you something went wrong without saying what, and the
 	// UI has nowhere else to look -- there is no console behind this.
@@ -147,10 +157,20 @@ func (m *Manager) run(ctx context.Context, job *Job, opts Options) {
 		SkipImages: opts.SkipImages,
 		MaxImages:  opts.MaxImages,
 		Limit:      opts.Limit,
-		Progress: func(done, total int) {
+		// Copies the whole snapshot on every tick, not just done/total, so a
+		// poller mid-run sees live counts instead of every field but progress
+		// staying at zero until the run ends -- and picks up RateLimited the
+		// moment origin.Enrich sets it, which is also how the guaranteed final
+		// call (Enrich always calls Progress once more after its loop, even on
+		// an early exit) makes the post-run copy below unnecessary.
+		Progress: func(done, total int, stats origin.EnrichStats) {
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			job.ModelsDone, job.ModelsTotal = done, total
+			job.Fetched, job.CacheHits = stats.Fetched, stats.CacheHits
+			job.Found, job.Missing = stats.Found, stats.Missing
+			job.Images, job.Errors = stats.Images, stats.Errors
+			job.RateLimited = stats.RateLimited
 		},
 		Logf: func(format string, args ...any) {
 			m.mu.Lock()
@@ -162,18 +182,16 @@ func (m *Manager) run(ctx context.Context, job *Job, opts Options) {
 		eo.Blobs = nil
 	}
 
-	stats, err := origin.Enrich(ctx, m.st, eo)
+	// stats itself is unused below: Enrich's own final Progress call already
+	// wrote every counter (including RateLimited) into job via the callback
+	// above, and that call happens on every return path that produces a
+	// non-nil stats, so copying them again here would only repeat it.
+	_, err := origin.Enrich(ctx, m.st, eo)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	finished := time.Now()
 	job.FinishedAt = &finished
-
-	if stats != nil {
-		job.Fetched, job.CacheHits = stats.Fetched, stats.CacheHits
-		job.Found, job.Missing = stats.Found, stats.Missing
-		job.Images, job.Errors = stats.Images, stats.Errors
-	}
 
 	switch {
 	case err != nil:

@@ -42,7 +42,11 @@ type EnrichOptions struct {
 	// MaxImages per model.
 	MaxImages int
 
-	Progress func(done, total int)
+	// Progress is called at the start of each model and once more after the
+	// loop ends, with a snapshot of stats as they stand at that moment -- so a
+	// poller reading it mid-run sees live counts rather than the run's final
+	// tally back-dated to look like it applied the whole way through.
+	Progress func(done, total int, stats EnrichStats)
 	Logf     func(format string, args ...any)
 }
 
@@ -55,7 +59,14 @@ type EnrichStats struct {
 	Missing    int
 	Images     int
 	Errors     int
-	Elapsed    time.Duration
+
+	// RateLimited means the provider cut the run short: the result covers only
+	// the models reached before that happened. Without this flag a truncated
+	// sweep is indistinguishable from "every eligible model was looked up",
+	// which is a wrong answer presented confidently.
+	RateLimited bool
+
+	Elapsed time.Duration
 }
 
 // Enrich looks up models on Civitai by hash and merges what comes back.
@@ -81,13 +92,22 @@ func Enrich(ctx context.Context, st *store.Store, opts EnrichOptions) (*EnrichSt
 	}
 	stats.Considered = len(targets)
 
+	// done tracks how many models were actually reached, independent of
+	// `targets`' length -- a run stopped by cancellation or a rate limit exits
+	// this loop with `i` still short of the end, and the final Progress call
+	// below must report that true count rather than claiming the whole set.
+	done := 0
 	for i, sha := range targets {
 		if ctx.Err() != nil {
 			break
 		}
 		if opts.Progress != nil {
-			opts.Progress(i, len(targets))
+			opts.Progress(done, len(targets), *stats)
 		}
+		// Marked reached before the lookup runs, not after: a model that hits
+		// the rate limit below was still attempted and is reflected in
+		// stats.Errors, so it counts as done even though it did not succeed.
+		done = i + 1
 
 		raw, fromCache, err := c_lookup(ctx, cache, opts, sha)
 		if err != nil {
@@ -97,6 +117,7 @@ func Enrich(ctx context.Context, st *store.Store, opts EnrichOptions) (*EnrichSt
 			// keep hitting it, and the run is designed to be resumed.
 			if isRateLimit(err) {
 				logf("stopping early: the API is rate limiting. Re-run to continue where this left off.")
+				stats.RateLimited = true
 				break
 			}
 			continue
@@ -143,10 +164,13 @@ func Enrich(ctx context.Context, st *store.Store, opts EnrichOptions) (*EnrichSt
 		}
 	}
 
-	if opts.Progress != nil {
-		opts.Progress(len(targets), len(targets))
-	}
+	// Set before the final Progress call, not after: the doc comment on
+	// Progress promises a snapshot of stats "as they stand at that moment",
+	// and that has to include Elapsed too, not just the counters.
 	stats.Elapsed = time.Since(started)
+	if opts.Progress != nil {
+		opts.Progress(done, len(targets), *stats)
+	}
 	return stats, nil
 }
 
@@ -226,18 +250,33 @@ func fetchImages(ctx context.Context, opts EnrichOptions, st *store.Store, sha s
 	return stored
 }
 
+// maxTargetParams caps how many caller-supplied hashes are looked up directly
+// by primary key, via a bound `IN (...)`, rather than by scanning the whole
+// eligible set and filtering in Go. Kept comfortably under SQLite's older
+// 999-parameter ceiling (3.32+ raised the default to 32766, but nothing here
+// depends on which build this binary links against). Above this size the
+// caller is a bulk, search-derived sweep rather than "one model, one click",
+// and naming that many bound parameters risks the ceiling the Go-side filter
+// exists to avoid.
+const maxTargetParams = 500
+
 // enrichTargets picks which models to look up.
 //
 // Only models with a real, confirmed hash: a provisional path was bound by
 // sampled probe rather than a full read, and querying an origin with a hash we
 // are not sure of would archive someone else's metadata under this file (§10.1).
 //
-// `want` narrows the result to a caller-supplied set. It is intersected in Go
-// rather than sent as a SQL `IN (...)`: a bulk run over a filtered library can
-// name five figures' worth of hashes, which is a bound parameter each and enough
-// to hit SQLite's host-parameter ceiling. The eligible set is materialized as a
-// slice either way, so intersecting costs one map and no extra query.
+// A small `want` set -- the common case: one model, refreshed from its detail
+// panel -- is looked up directly by primary key (enrichTargetsByHash) rather
+// than filtered out of a full scan: sorting the whole library to answer "is
+// this one hash eligible" is unnecessary I/O paid on every button press. A
+// large `want` set, or none at all, goes through the full scan below with a
+// Go-side map filter, for the reason given on maxTargetParams.
 func enrichTargets(st *store.Store, limit int, want []string) ([]string, error) {
+	if n := len(want); n > 0 && n <= maxTargetParams {
+		return enrichTargetsByHash(st, limit, want)
+	}
+
 	// Applied after filtering, not in SQL: with a target set, LIMIT in the query
 	// would cap the *eligible* rows before the intersection and could return
 	// nothing at all while the named models sat just past the cut.
@@ -276,6 +315,51 @@ func enrichTargets(st *store.Store, limit int, want []string) ([]string, error) 
 	return out, rows.Err()
 }
 
+// enrichTargetsByHash looks up a small, explicit set of hashes directly by
+// primary key, applying the same eligibility rule and ordering as the full
+// scan in enrichTargets.
+func enrichTargetsByHash(st *store.Store, limit int, want []string) ([]string, error) {
+	placeholders := make([]string, len(want))
+	args := make([]any, len(want))
+	for i, sha := range want {
+		placeholders[i] = "?"
+		args[i] = strings.ToLower(sha)
+	}
+
+	// sha256 is stored lower-case (it comes from hex.EncodeToString) and every
+	// caller already lower-cases what it passes in, so this compares directly
+	// against the primary key rather than wrapping it in LOWER(...), which
+	// would have made the index unusable and defeated the point of this path.
+	query := fmt.Sprintf(`
+        SELECT f.sha256
+          FROM model_file f
+         WHERE f.sha256 IN (%s)
+           AND EXISTS (
+                   SELECT 1 FROM model_file_path p
+                    WHERE p.sha256 = f.sha256 AND p.present = 1 AND p.provisional = 0
+               )
+         ORDER BY f.size DESC`, strings.Join(placeholders, ","))
+
+	rows, err := st.DB().Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("origin: selecting enrichment targets: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return nil, err
+		}
+		out = append(out, sha)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, rows.Err()
+}
+
 func (c *Client) fetchBytes(ctx context.Context, url string) ([]byte, error) {
 	if err := c.throttle(ctx); err != nil {
 		return nil, err
@@ -305,6 +389,9 @@ func (s *EnrichStats) Summary() string {
 	}
 	if s.Errors > 0 {
 		out += fmt.Sprintf("  errors %d", s.Errors)
+	}
+	if s.RateLimited {
+		out += "  (rate limited — partial result, re-run to continue)"
 	}
 	return out + fmt.Sprintf("  (%s)", s.Elapsed.Round(time.Second))
 }

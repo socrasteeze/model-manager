@@ -483,6 +483,8 @@ export interface EnrichJob {
   missing: number
   images: number
   errors: number
+  /** The origin cut the run short before models_done reached models_total. */
+  rate_limited: boolean
   last_error?: string
   error?: string
 }

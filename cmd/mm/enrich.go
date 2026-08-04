@@ -60,7 +60,7 @@ a while, so stop it whenever you like and re-run to continue.`)
 		SkipImages: *skipImages,
 		MaxImages:  *maxImages,
 		Logf:       func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
-		Progress: func(done, total int) {
+		Progress: func(done, total int, _ origin.EnrichStats) {
 			if total > 0 {
 				fmt.Fprintf(os.Stderr, "\r  %d/%d models   ", done, total)
 			}
