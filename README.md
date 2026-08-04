@@ -46,10 +46,11 @@ and what that measurably costs.
 
 ## Install
 
-**Current release: [v0.3.1](../../releases/tag/v0.3.1)** — a bugfix release for
-v0.3.0's "refresh from origin" feature: accurate sweep progress, visible
-rate-limit stops, live counts, and a fast path for single-model refreshes. See
-its [release notes](docs/release-notes/v0.3.1.md); nothing is mandatory to run
+**Current release: [v0.3.2](../../releases/tag/v0.3.2)** — a second bugfix
+release for the "refresh from origin" feature: correct availability gating,
+an accurate 409 for a missing (vs. unconfirmed) model, a single shared sweep
+poll, and less redundant work per refresh. See its
+[release notes](docs/release-notes/v0.3.2.md); nothing is mandatory to run
 after upgrading.
 
 Download the binary for your platform from the
