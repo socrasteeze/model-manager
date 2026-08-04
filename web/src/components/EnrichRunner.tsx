@@ -1,12 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  activeEnrich,
-  cancelEnrich,
-  config,
-  startEnrich,
-  type EnrichJob,
-  type Filters,
-} from '../api'
+import { config } from '../api'
+import { relativeTime, useEnrichFinished, useEnrichJob } from '../hooks/useEnrichJob'
+import type { Filters } from '../api'
 
 interface Props {
   /**
@@ -28,61 +22,25 @@ interface Props {
 }
 
 /**
- * Starts a background enrichment sweep and follows it.
+ * A button for the shared enrichment sweep, plus its progress and outcome.
  *
- * The daemon runs at most one sweep at a time, so this mounts in two places (the
- * library toolbar and Settings) and both show the same run. On mount it adopts
- * whatever is already in flight rather than assuming there is nothing — a phone
- * opening the UI mid-sweep should see the progress, not an idle button.
+ * The polling, job state and error state all live in EnrichJobProvider (see
+ * hooks/useEnrichJob.tsx) rather than here: this component is rendered in two
+ * places at once (the library toolbar and Settings, which stays mounted while
+ * hidden), and the daemon only ever runs one sweep regardless of which button
+ * started it. This component is just a view onto that shared state, plus the
+ * one thing that IS genuinely per-instance -- which filters *this* button's
+ * sweep should cover, and what to do when it finishes.
  */
 export function EnrichRunner({ filters, expected, label, className, onFinished }: Props) {
-  const [job, setJob] = useState<EnrichJob | null>(null)
-  const [available, setAvailable] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [starting, setStarting] = useState(false)
-
-  // Held in a ref so the polling effect does not re-subscribe whenever the
-  // caller re-renders with a new closure.
-  const finished = useRef(onFinished)
-  finished.current = onFinished
-
-  const poll = useCallback(async () => {
-    try {
-      const { job: current, available: ok } = await activeEnrich()
-      setAvailable(ok)
-      setJob(current)
-      return current
-    } catch {
-      // A poll that fails is not a run that failed; the next tick may well
-      // succeed, and blanking the progress would be a lie about the sweep.
-      return null
-    }
-  }, [])
-
-  useEffect(() => {
-    void poll()
-  }, [poll])
-
-  // Poll only while something is running. A finished run is terminal, so there
-  // is nothing to learn by asking again every second forever.
-  const running = job?.state === 'running'
-  const wasRunning = useRef(false)
-  useEffect(() => {
-    if (!running) {
-      if (wasRunning.current) {
-        wasRunning.current = false
-        finished.current?.()
-      }
-      return
-    }
-    wasRunning.current = true
-    const timer = setInterval(() => void poll(), 1000)
-    return () => clearInterval(timer)
-  }, [running, poll])
+  const { job, available, error, starting, start, cancel, clearError } = useEnrichJob()
+  useEnrichFinished(() => onFinished?.())
 
   if (config.readOnly || !available) return null
 
-  const start = async () => {
+  const running = job?.state === 'running'
+
+  const handleStart = async () => {
     // A library-wide sweep is one throttled request per model against a public
     // API -- minutes to hours. Worth confirming rather than starting on a click.
     if (expected === undefined || expected > 50) {
@@ -100,17 +58,11 @@ export function EnrichRunner({ filters, expected, label, className, onFinished }
       }
     }
 
-    setStarting(true)
-    setError(null)
+    clearError()
     try {
-      setJob(await startEnrich(filters))
-    } catch (e) {
-      setError((e as Error).message)
-      // A 409 means somebody else's run is already going; adopt it rather than
-      // leaving the user with an error and no progress to watch.
-      void poll()
-    } finally {
-      setStarting(false)
+      await start(filters)
+    } catch {
+      // Recorded in the shared error state already; nothing more to do here.
     }
   }
 
@@ -120,7 +72,7 @@ export function EnrichRunner({ filters, expected, label, className, onFinished }
   return (
     <div className={`enrich-runner${className ? ` ${className}` : ''}`}>
       {!running && (
-        <button disabled={starting} onClick={() => void start()}>
+        <button disabled={starting} onClick={() => void handleStart()}>
           {starting ? 'Starting…' : label}
         </button>
       )}
@@ -133,7 +85,7 @@ export function EnrichRunner({ filters, expected, label, className, onFinished }
             {job.found > 0 && ` — ${job.found.toLocaleString()} matched`}
             {job.images > 0 && `, ${job.images.toLocaleString()} images`}
           </span>
-          <button onClick={() => void cancelEnrich(job.id).then(poll).catch(() => {})}>Stop</button>
+          <button onClick={cancel}>Stop</button>
         </div>
       )}
 
@@ -145,6 +97,7 @@ export function EnrichRunner({ filters, expected, label, className, onFinished }
           {job.errors > 0 && `, ${job.errors.toLocaleString()} errors`}.
           {job.rate_limited &&
             ' The origin rejected a request during this run — run it again to make sure everything was covered.'}
+          {job.finished_at && ` (${relativeTime(job.finished_at)})`}
         </span>
       )}
 
@@ -152,11 +105,15 @@ export function EnrichRunner({ filters, expected, label, className, onFinished }
         <span className="source-note">
           Stopped after {job.models_done.toLocaleString()}. Everything fetched was kept — running
           again continues from here.
+          {job.finished_at && ` (${relativeTime(job.finished_at)})`}
         </span>
       )}
 
       {!running && job?.state === 'failed' && (
-        <span className="error inline">{job.error || 'The run failed.'}</span>
+        <span className="error inline">
+          {job.error || 'The run failed.'}
+          {job.finished_at && ` (${relativeTime(job.finished_at)})`}
+        </span>
       )}
 
       {/* The per-model failure the run last saw. The counter alone says

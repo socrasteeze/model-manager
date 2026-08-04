@@ -17,6 +17,12 @@ Every entry links to the full release notes for that version.
   to a command that cannot help.
 - Refreshing one model from its detail panel fetched the model's full
   record twice. It now fetches it once.
+- The library toolbar and Settings each ran their own poll for sweep
+  progress, and an error shown on one could outlive the run it was about.
+  There is now one shared poll, and it clears itself once it has current
+  truth.
+- A finished sweep's summary always read like it had just happened. It now
+  says how long ago it ran.
 
 ## [v0.3.1](docs/release-notes/v0.3.1.md) — 2026-08-03
 
