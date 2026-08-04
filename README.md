@@ -46,11 +46,11 @@ and what that measurably costs.
 
 ## Install
 
-**Current release: [v0.2.0](../../releases/tag/v0.2.0)** — managed directories,
-per-tool download folders, persistent filters, editable thumbnails and ComfyUI
-rendering. See its [release notes](docs/release-notes/v0.2.0.md) for what to run
-after upgrading from v0.1.0; nothing is mandatory, since both schema migrations
-apply themselves.
+**Current release: [v0.3.1](../../releases/tag/v0.3.1)** — a bugfix release for
+v0.3.0's "refresh from origin" feature: accurate sweep progress, visible
+rate-limit stops, live counts, and a fast path for single-model refreshes. See
+its [release notes](docs/release-notes/v0.3.1.md); nothing is mandatory to run
+after upgrading.
 
 Download the binary for your platform from the
 [latest release](../../releases/latest) — one file, nothing to install. Windows
