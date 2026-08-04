@@ -9,7 +9,8 @@
 //
 // The shape is the one the download manager already established: register
 // synchronously so the caller gets an ID back in the 202, run detached, poll
-// for progress, cancel by ID.
+// for progress, cancel by ID. The at-most-one-at-a-time bookkeeping behind
+// that shape lives in internal/jobrun, shared with enrichjob.
 //
 // One scan at a time, deliberately. Two concurrent scans of overlapping trees
 // contend on the single SQLite writer for no gain, and if the trees actually do
@@ -20,9 +21,9 @@ package scanjob
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
+	"github.com/socrasteeze/model-manager/internal/jobrun"
 	"github.com/socrasteeze/model-manager/internal/scan"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
@@ -30,14 +31,17 @@ import (
 // ErrInFlight means a scan is already running.
 var ErrInFlight = errors.New("scanjob: a scan is already running")
 
-// State is where a scan is.
-type State string
+// State is where a scan is. An alias, not a new type: scanjob's State was
+// already identical to jobrun's before jobrun existed, and aliasing keeps
+// every existing scanjob.State / scanjob.StateRunning reference working
+// unchanged.
+type State = jobrun.State
 
 const (
-	StateRunning   State = "running"
-	StateComplete  State = "complete"
-	StateFailed    State = "failed"
-	StateCancelled State = "cancelled"
+	StateRunning   = jobrun.StateRunning
+	StateComplete  = jobrun.StateComplete
+	StateFailed    = jobrun.StateFailed
+	StateCancelled = jobrun.StateCancelled
 )
 
 // Job is one scan, as reported to a poller.
@@ -63,21 +67,21 @@ type Job struct {
 	Error string `json:"error,omitempty"`
 }
 
+// Running and JobID satisfy jobrun.Runnable.
+func (j Job) Running() bool { return j.State == StateRunning }
+func (j Job) JobID() string { return j.ID }
+
 // Manager owns the at-most-one running scan and the record of the last one.
 type Manager struct {
-	st   *store.Store
-	opts scan.Options
-
-	mu      sync.Mutex
-	current *Job
-	cancel  context.CancelFunc
-	seq     int64
+	st     *store.Store
+	opts   scan.Options
+	runner *jobrun.Runner[Job]
 }
 
 // New builds a Manager. The options supplied here carry the tuning (workers per
 // device, buffer size); Roots are set per run.
 func New(st *store.Store, opts scan.Options) *Manager {
-	return &Manager{st: st, opts: opts}
+	return &Manager{st: st, opts: opts, runner: jobrun.New[Job](jobrun.GenID("scan"))}
 }
 
 // Start begins a scan of roots. It registers the job before returning, so the
@@ -86,11 +90,13 @@ func New(st *store.Store, opts scan.Options) *Manager {
 // An empty roots slice means "every enabled managed root", which is what the
 // rescan-everything button asks for.
 func (m *Manager) Start(roots []string) (Job, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.current != nil && m.current.State == StateRunning {
-		return *m.current, ErrInFlight
+	// Checked before resolving roots, not after: a scan already running must
+	// always refuse with ErrInFlight, regardless of what EnabledRootPaths
+	// would say. Resolving roots first would let "every root got disabled
+	// while a scan was running" surface as "no roots to scan" instead --
+	// losing the caller's handle on the scan that is, in fact, still going.
+	if job, running := m.runner.InFlight(); running {
+		return job, ErrInFlight
 	}
 
 	if len(roots) == 0 {
@@ -104,27 +110,30 @@ func (m *Manager) Start(roots []string) (Job, error) {
 		return Job{}, errors.New("scanjob: no roots to scan")
 	}
 
-	m.seq++
-	ctx, cancel := context.WithCancel(context.Background())
-	job := &Job{
-		ID:        scanID(m.seq),
-		Roots:     append([]string(nil), roots...),
-		State:     StateRunning,
-		StartedAt: time.Now(),
+	job, snapshot, ctx, ok := m.runner.Start(func(id string) *Job {
+		return &Job{
+			ID:        id,
+			Roots:     append([]string(nil), roots...),
+			State:     StateRunning,
+			StartedAt: time.Now(),
+		}
+	})
+	if !ok {
+		// Lost the race against another Start between the InFlight check
+		// above and here -- rare, but Start's own guard still catches it.
+		return snapshot, ErrInFlight
 	}
-	m.current = job
-	m.cancel = cancel
 
 	go m.run(ctx, job)
-	return *job, nil
+	return snapshot, nil
 }
 
 func (m *Manager) run(ctx context.Context, job *Job) {
 	opts := m.opts
 	opts.Roots = job.Roots
 	opts.Progress = func(s scan.Snapshot) {
-		m.mu.Lock()
-		defer m.mu.Unlock()
+		m.runner.Lock()
+		defer m.runner.Unlock()
 		job.FilesTotal = s.FilesTotal
 		job.FilesDone = s.FilesDone
 		job.FilesHashed = s.FilesHashed
@@ -139,8 +148,8 @@ func (m *Manager) run(ctx context.Context, job *Job) {
 
 	result, err := scan.Run(ctx, m.st, opts)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.runner.Lock()
+	defer m.runner.Unlock()
 	finished := time.Now()
 	job.FinishedAt = &finished
 	switch {
@@ -167,12 +176,7 @@ func (m *Manager) run(ctx context.Context, job *Job) {
 
 // Current returns the running or most recent scan, if any.
 func (m *Manager) Current() (Job, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.current == nil {
-		return Job{}, false
-	}
-	return *m.current, true
+	return m.runner.Current()
 }
 
 // Cancel stops the running scan. Reports whether there was one to stop.
@@ -181,28 +185,5 @@ func (m *Manager) Current() (Job, bool) {
 // stays committed, and the absence sweep simply does not run for roots that
 // did not finish, which is the whole reason the sweep is gated on completion.
 func (m *Manager) Cancel(id string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.current == nil || m.current.State != StateRunning {
-		return false
-	}
-	if id != "" && id != m.current.ID {
-		return false
-	}
-	if m.cancel != nil {
-		m.cancel()
-	}
-	return true
-}
-
-func scanID(seq int64) string {
-	const digits = "0123456789"
-	if seq == 0 {
-		return "scan-0"
-	}
-	var buf []byte
-	for n := seq; n > 0; n /= 10 {
-		buf = append([]byte{digits[n%10]}, buf...)
-	}
-	return "scan-" + string(buf)
+	return m.runner.Cancel(id)
 }

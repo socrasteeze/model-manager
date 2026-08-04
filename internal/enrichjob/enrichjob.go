@@ -10,7 +10,8 @@
 //
 // The shape is the one scanjob and the download manager already established:
 // register synchronously so the caller gets an ID back in the 202, run detached,
-// poll for progress, cancel by ID.
+// poll for progress, cancel by ID. The at-most-one-at-a-time bookkeeping behind
+// that shape lives in internal/jobrun, shared with scanjob.
 //
 // One sweep at a time, deliberately. Two concurrent sweeps would each honour
 // their own throttle and together double the request rate against the very API
@@ -21,10 +22,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/jobrun"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
@@ -32,14 +33,17 @@ import (
 // ErrInFlight means a sweep is already running.
 var ErrInFlight = errors.New("enrichjob: an enrichment run is already in progress")
 
-// State is where a sweep is.
-type State string
+// State is where a sweep is. An alias, not a new type: enrichjob's State was
+// already identical to jobrun's before jobrun existed, and aliasing keeps
+// every existing enrichjob.State / enrichjob.StateRunning reference working
+// unchanged.
+type State = jobrun.State
 
 const (
-	StateRunning   State = "running"
-	StateComplete  State = "complete"
-	StateFailed    State = "failed"
-	StateCancelled State = "cancelled"
+	StateRunning   = jobrun.StateRunning
+	StateComplete  = jobrun.StateComplete
+	StateFailed    = jobrun.StateFailed
+	StateCancelled = jobrun.StateCancelled
 )
 
 // Options are the per-run knobs the UI exposes.
@@ -102,16 +106,16 @@ type Job struct {
 	Error string `json:"error,omitempty"`
 }
 
+// Running and JobID satisfy jobrun.Runnable.
+func (j Job) Running() bool { return j.State == StateRunning }
+func (j Job) JobID() string { return j.ID }
+
 // Manager owns the at-most-one running sweep and the record of the last one.
 type Manager struct {
 	st     *store.Store
 	blobs  *blobstore.Store
 	client func() *origin.Client
-
-	mu      sync.Mutex
-	current *Job
-	cancel  context.CancelFunc
-	seq     int64
+	runner *jobrun.Runner[Job]
 }
 
 // New builds a Manager.
@@ -120,32 +124,21 @@ type Manager struct {
 // the credentials configured at the time it starts. A key pasted into Settings
 // has to apply to the next sweep without restarting the daemon.
 func New(st *store.Store, blobs *blobstore.Store, client func() *origin.Client) *Manager {
-	return &Manager{st: st, blobs: blobs, client: client}
+	return &Manager{st: st, blobs: blobs, client: client, runner: jobrun.New[Job](jobrun.GenID("enrich"))}
 }
 
 // Start begins a sweep. It registers the job before returning, so the caller's
 // first poll is guaranteed to see it.
 func (m *Manager) Start(scope string, opts Options) (Job, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.current != nil && m.current.State == StateRunning {
-		return *m.current, ErrInFlight
+	job, snapshot, ctx, ok := m.runner.Start(func(id string) *Job {
+		return &Job{ID: id, State: StateRunning, Scope: scope, StartedAt: time.Now()}
+	})
+	if !ok {
+		return snapshot, ErrInFlight
 	}
-
-	m.seq++
-	ctx, cancel := context.WithCancel(context.Background())
-	job := &Job{
-		ID:        jobID(m.seq),
-		State:     StateRunning,
-		Scope:     scope,
-		StartedAt: time.Now(),
-	}
-	m.current = job
-	m.cancel = cancel
 
 	go m.run(ctx, job, opts)
-	return *job, nil
+	return snapshot, nil
 }
 
 func (m *Manager) run(ctx context.Context, job *Job, opts Options) {
@@ -164,8 +157,8 @@ func (m *Manager) run(ctx context.Context, job *Job, opts Options) {
 		// call (Enrich always calls Progress once more after its loop, even on
 		// an early exit) makes the post-run copy below unnecessary.
 		Progress: func(done, total int, stats origin.EnrichStats) {
-			m.mu.Lock()
-			defer m.mu.Unlock()
+			m.runner.Lock()
+			defer m.runner.Unlock()
 			job.ModelsDone, job.ModelsTotal = done, total
 			job.Fetched, job.CacheHits = stats.Fetched, stats.CacheHits
 			job.Found, job.Missing = stats.Found, stats.Missing
@@ -173,8 +166,8 @@ func (m *Manager) run(ctx context.Context, job *Job, opts Options) {
 			job.RateLimited = stats.RateLimited
 		},
 		Logf: func(format string, args ...any) {
-			m.mu.Lock()
-			defer m.mu.Unlock()
+			m.runner.Lock()
+			defer m.runner.Unlock()
 			job.LastError = fmt.Sprintf(format, args...)
 		},
 	}
@@ -188,8 +181,8 @@ func (m *Manager) run(ctx context.Context, job *Job, opts Options) {
 	// non-nil stats, so copying them again here would only repeat it.
 	_, err := origin.Enrich(ctx, m.st, eo)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.runner.Lock()
+	defer m.runner.Unlock()
 	finished := time.Now()
 	job.FinishedAt = &finished
 
@@ -209,12 +202,7 @@ func (m *Manager) run(ctx context.Context, job *Job, opts Options) {
 
 // Current returns the running or most recent sweep, if any.
 func (m *Manager) Current() (Job, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.current == nil {
-		return Job{}, false
-	}
-	return *m.current, true
+	return m.runner.Current()
 }
 
 // Cancel stops the running sweep. Reports whether there was one to stop.
@@ -223,28 +211,5 @@ func (m *Manager) Current() (Job, bool) {
 // archived, and re-running continues where this stopped -- which is the whole
 // reason the archive is consulted before the network.
 func (m *Manager) Cancel(id string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.current == nil || m.current.State != StateRunning {
-		return false
-	}
-	if id != "" && id != m.current.ID {
-		return false
-	}
-	if m.cancel != nil {
-		m.cancel()
-	}
-	return true
-}
-
-func jobID(seq int64) string {
-	const digits = "0123456789"
-	if seq == 0 {
-		return "enrich-0"
-	}
-	var buf []byte
-	for n := seq; n > 0; n /= 10 {
-		buf = append([]byte{digits[n%10]}, buf...)
-	}
-	return "enrich-" + string(buf)
+	return m.runner.Cancel(id)
 }
