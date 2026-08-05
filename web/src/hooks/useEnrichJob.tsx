@@ -149,22 +149,8 @@ export function useEnrichFinished(cb: () => void): void {
 }
 
 /**
- * Formats an ISO timestamp as a short relative time, so a finished sweep's
- * summary says how long ago it ran instead of implying it just happened.
- * Falls back to a locale date once "N days ago" stops being useful at a
- * glance.
+ * Re-exported so components that already import from this module do not need a
+ * second import for it. The implementation lives in api.ts because the update
+ * badge needs it too, and two copies would be two sets of thresholds.
  */
-export function relativeTime(iso: string): string {
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return ''
-  const seconds = Math.round((Date.now() - then) / 1000)
-  if (seconds < 5) return 'just now'
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.round(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.round(hours / 24)
-  if (days < 7) return `${days}d ago`
-  return new Date(iso).toLocaleDateString()
-}
+export { relativeTimeOrEmpty as relativeTime } from '../api'

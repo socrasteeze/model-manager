@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   browse,
   cancelDownload,
-  checkUpdates,
+  listUpdates,
+  startUpdateSweep,
   config,
   downloadRoots,
   emptyBrowseQuery,
@@ -10,6 +11,7 @@ import {
   isJobActive,
   isJobTerminalFailure,
   listDownloads,
+  relativeTimeOrEmpty,
   remoteImageURL,
   startDownload,
   type BrowseQuery,
@@ -94,6 +96,66 @@ export function BrowsePanel({ hidden, includeNSFW }: Props) {
       .then(setResults)
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
+  }, [])
+
+  // Show whatever the last sweep recorded as soon as the tab is opened. This
+  // read is free -- it hits stored data, not the provider -- so there is no
+  // reason to make the user press a button to find out what is already known.
+  const [checkProgress, setCheckProgress] = useState('')
+  useEffect(() => {
+    if (hidden) return
+    listUpdates()
+      .then((r) => setUpdates(r.updates.length > 0 ? r.updates : null))
+      .catch(() => {})
+  }, [hidden])
+
+  // Start a sweep, then poll the same endpoint until it stops running.
+  //
+  // The button used to call a GET that performed the whole check inline and
+  // returned the answer. Now the check is a background job, so this is
+  // POST-then-poll -- and the result it lands on is stored, which is what lets
+  // the library badge every affected model rather than showing a list that
+  // vanishes when this panel unmounts.
+  const runUpdateCheck = useCallback(async () => {
+    setChecking(true)
+    setError(null)
+    setCheckProgress('')
+    try {
+      await startUpdateSweep()
+    } catch (e) {
+      // A 409 means one is already running -- adopt it and poll, rather than
+      // reporting an error for something that is going to produce an answer.
+      const msg = (e as Error).message
+      if (!/already in progress/i.test(msg)) {
+        setError(msg)
+        setChecking(false)
+        return
+      }
+    }
+
+    try {
+      for (;;) {
+        const r = await listUpdates()
+        setUpdates(r.updates)
+        if (!r.job || r.job.state !== 'running') {
+          if (r.job?.rate_limited) {
+            setError(
+              'The origin started rate limiting, so not every model was checked. Run it again to continue.',
+            )
+          }
+          return
+        }
+        if (r.job.models_total > 0) {
+          setCheckProgress(` ${r.job.models_done}/${r.job.models_total}`)
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+      }
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setChecking(false)
+      setCheckProgress('')
+    }
   }, [])
 
   // The preference is the only source of truth for adult results. This was a
@@ -203,15 +265,9 @@ export function BrowsePanel({ hidden, includeNSFW }: Props) {
           <button
             className="link"
             disabled={checking}
-            onClick={() => {
-              setChecking(true)
-              checkUpdates()
-                .then((r) => setUpdates(r.updates))
-                .catch((e: Error) => setError(e.message))
-                .finally(() => setChecking(false))
-            }}
+            onClick={() => void runUpdateCheck()}
           >
-            {checking ? 'Checking…' : 'Check for updates'}
+            {checking ? `Checking${checkProgress}…` : 'Check for updates'}
           </button>
         </div>
       </div>
@@ -474,12 +530,15 @@ function UpdateList({ updates, onClose }: { updates: Update[]; onClose: () => vo
         </button>
       </div>
       {updates.map((u) => (
-        <div key={`${u.provider}:${u.model_id}`} className="update-row">
+        // Keyed by the local file, not the remote model: two owned versions of
+        // one model are two rows, and a model key would collide.
+        <div key={u.sha256} className="update-row">
           <div>
-            <strong>{u.name}</strong>
+            <strong>{u.name || u.local_path?.split(/[/\\]/).pop() || u.model_id}</strong>
             <span className="source-note">
               {' '}
               {u.have_version_name || 'current'} → {u.latest_version_name || u.latest_version_id}
+              {u.checked_at && ` (checked ${relativeTimeOrEmpty(u.checked_at)})`}
             </span>
             {/* A LoRA rebuilt onto a different base is published as a new
                 version of the same model but is not a drop-in replacement. */}

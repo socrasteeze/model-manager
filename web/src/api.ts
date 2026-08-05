@@ -43,6 +43,38 @@ export interface SearchHit {
   path_count: number
   present: boolean
   nsfw?: boolean
+
+  /** Whether the last update check found a newer version upstream. */
+  update_available?: boolean
+  have_version_name?: string
+  latest_version_name?: string
+  /** When the provider was last asked, so the UI can age a stale answer. */
+  update_checked_at?: string
+  /** The newer version targets a different base model: not a drop-in swap. */
+  update_base_model_changed?: boolean
+}
+
+/**
+ * A short relative time, or '' for a missing/unparseable timestamp.
+ *
+ * Lives here rather than beside a component because two unrelated places need
+ * it -- the sweep summary and the per-model update badge -- and a second copy
+ * would be a second set of thresholds to keep in step.
+ */
+export function relativeTimeOrEmpty(iso?: string): string {
+  if (!iso) return ''
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return ''
+  const seconds = Math.round((Date.now() - then) / 1000)
+  if (seconds < 5) return 'just now'
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.round(hours / 24)
+  if (days < 7) return `${days}d ago`
+  return new Date(iso).toLocaleDateString()
 }
 
 export interface SearchResults {
@@ -145,6 +177,8 @@ export interface CandidateView {
 }
 
 export interface Facets {
+  /** How many models have a newer version upstream, with this filter lifted. */
+  needs_update?: number
   types: Record<string, number>
   base_models: Record<string, number>
   origins: Record<string, number>
@@ -164,6 +198,7 @@ export interface Filters {
   tag: string[]
   present?: boolean
   needs_attention?: boolean
+  needs_update?: boolean
   sort: string
   order: 'asc' | 'desc'
 }
@@ -241,6 +276,7 @@ export function filterParams(filters?: Filters): URLSearchParams {
   for (const t of filters.tag) params.append('tag', t)
   if (filters.present !== undefined) params.set('present', String(filters.present))
   if (filters.needs_attention) params.set('needs_attention', 'true')
+  if (filters.needs_update) params.set('needs_update', 'true')
   return params
 }
 
@@ -418,32 +454,61 @@ export const cancelDownload = (id: string) =>
   request<{ status: string }>(`/api/downloads/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
 export interface Update {
+  sha256: string
   provider: string
   model_id: string
-  name: string
+  name?: string
   have_version_id?: string
   have_version_name?: string
   latest_version_id: string
   latest_version_name?: string
   published_at?: string
-  local_sha256?: string
   local_path?: string
   base_model?: string
   size_bytes?: number
   download_url?: string
   page_url?: string
+  checked_at?: string
   base_model_changed?: boolean
+}
+
+export interface UpdateJob {
+  id: string
+  state: 'running' | 'complete' | 'failed' | 'cancelled'
+  started_at: string
+  finished_at?: string
+  models_total: number
+  models_done: number
+  checked: number
+  found: number
+  errors: number
+  rate_limited: boolean
+  last_error?: string
+  error?: string
 }
 
 export interface UpdatesResults {
   updates: Update[]
-  checked: number
-  errors: number
+  /** Whether a sweep could be started now — not whether there is data to show. */
+  available: boolean
+  job?: UpdateJob
 }
 
-// No limit by default: the check is one request per owned model and the server
-// bounds it, so the UI does not also guess at a cap.
-export const checkUpdates = () => request<UpdatesResults>('/api/updates')
+/**
+ * Reads what the last sweep recorded. No network on the server side, so this
+ * is instant and works on a --no-remote daemon.
+ *
+ * This used to perform the whole check inline, which is why the button that
+ * calls it said "Check for updates" and took minutes.
+ */
+export const listUpdates = () => request<UpdatesResults>('/api/updates')
+
+/** Starts a background sweep. 409 if one is already running, or if an enrichment sweep holds the shared rate limit. */
+export const startUpdateSweep = () =>
+  request<UpdateJob>('/api/updates', { method: 'POST' })
+
+export const cancelUpdateSweep = (id: string) =>
+  request<void>(`/api/updates/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
 export const getModel = (sha: string) => request<ModelDetail>(`/api/models/${sha}`)
 export const getCandidates = (sha: string) => request<CandidateView[]>(`/api/models/${sha}/candidates`)

@@ -20,7 +20,8 @@ export function FilterPanel({ facets, filters, onChange }: Props) {
     filters.base_model.length ||
     filters.tag.length ||
     filters.present !== undefined ||
-    filters.needs_attention
+    filters.needs_attention ||
+    filters.needs_update
 
   return (
     <div className="filters">
@@ -53,6 +54,21 @@ export function FilterPanel({ facets, filters, onChange }: Props) {
           />
           <span>Needs attention</span>
         </label>
+        {/* Only offered once a check has actually found something. A
+            permanently-zero control invites the question "why is this always
+            empty", which the answer to is "you have not run a check" -- said
+            far better by the button in Settings than by a dead checkbox. */}
+        {(facets?.needs_update ?? 0) > 0 && (
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={!!filters.needs_update}
+              onChange={(e) => onChange({ ...filters, needs_update: e.target.checked || undefined })}
+            />
+            <span className="check-label">Needs update</span>
+            <span className="count">{(facets?.needs_update ?? 0).toLocaleString()}</span>
+          </label>
+        )}
       </div>
 
       {/* Last, not first. Appearing above the facet lists pushed Type, Base
@@ -64,7 +80,7 @@ export function FilterPanel({ facets, filters, onChange }: Props) {
       {active ? (
         <button
           className="clear"
-          onClick={() => onChange({ ...filters, type: [], base_model: [], tag: [], present: undefined, needs_attention: undefined })}
+          onClick={() => onChange({ ...filters, type: [], base_model: [], tag: [], present: undefined, needs_attention: undefined, needs_update: undefined })}
         >
           Clear filters
         </button>

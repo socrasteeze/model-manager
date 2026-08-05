@@ -148,7 +148,8 @@ export function App() {
       filters.base_model.length +
       filters.tag.length +
       (filters.present !== undefined ? 1 : 0) +
-      (filters.needs_attention ? 1 : 0),
+      (filters.needs_attention ? 1 : 0) +
+      (filters.needs_update ? 1 : 0),
     [filters],
   )
 

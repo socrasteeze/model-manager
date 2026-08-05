@@ -1,4 +1,23 @@
-import { formatBytes, previewURL, type SearchHit } from '../api'
+import { formatBytes, previewURL, relativeTimeOrEmpty, type SearchHit } from '../api'
+
+/**
+ * The badge's tooltip.
+ *
+ * Says which version you have and which one is newer, because a badge that can
+ * only say "update" gives you nothing to decide with -- and says when the
+ * answer is from, because a stored result presented without its age reads as
+ * freshly checked whether it is a minute or a month old.
+ */
+function updateTitle(hit: SearchHit): string {
+  const have = hit.have_version_name || 'the version you have'
+  const latest = hit.latest_version_name || 'a newer version'
+  const age = relativeTimeOrEmpty(hit.update_checked_at)
+  const when = age ? ` (checked ${age})` : ''
+  if (hit.update_base_model_changed) {
+    return `${latest} is newer than ${have}, but targets a different base model — not a drop-in replacement${when}`
+  }
+  return `${have} → ${latest}${when}`
+}
 
 interface Props {
   hit: SearchHit
@@ -32,6 +51,14 @@ export function ModelCard({ hit, selected, onSelect }: Props) {
         <div className="card-meta">
           {hit.type && <span className="chip">{hit.type}</span>}
           {hit.base_model && <span className="chip subtle">{hit.base_model}</span>}
+          {/* In the meta row rather than overlaid on the image: an update is
+              about the record, not the picture, and the corners are already
+              taken by "missing" and "nsfw". */}
+          {hit.update_available && (
+            <span className="chip update-chip" title={updateTitle(hit)}>
+              {hit.update_base_model_changed ? 'new base' : 'update'}
+            </span>
+          )}
         </div>
         <div className="card-foot">
           <span>{formatBytes(hit.size)}</span>

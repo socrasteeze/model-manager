@@ -261,6 +261,9 @@ input:focus, select:focus, textarea:focus {
   color: var(--text);
 }
 .chip.subtle { background: var(--bg-sunken); color: var(--text-dim); }
+/* The library card's update marker. Uses the accent rather than the warning
+   colour: a newer version is information, not a problem. */
+.chip.update-chip { background: var(--accent); color: #06121f; font-weight: 600; }
 
 .load-more { display: block; margin: 20px auto; padding: 8px 20px; }
 

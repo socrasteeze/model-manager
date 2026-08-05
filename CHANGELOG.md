@@ -9,6 +9,12 @@ Every entry links to the full release notes for that version.
 
 ### Added
 
+- The library now marks models that have a newer version upstream, with a
+  "Needs update" filter beside the other filters. The mark says which version
+  you have, which one is newer, and when the check ran.
+- Update checks now run in the background and are saved. Before, the check ran
+  while you waited and the answer was lost when you left the tab.
+
 - A Settings control for the thumbnail shape. Previews are nearly always
   portrait, so grids are now 3:4 by default instead of square, which used to
   crop the top and bottom off most images. Tall (2:3) and square are also
