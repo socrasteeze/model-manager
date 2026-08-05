@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   browse,
   cancelDownload,
@@ -21,7 +21,9 @@ import {
   type RemoteFile,
   MODEL_TYPES,
   type Update,
+  type GroupingMode,
 } from '../api'
+import { groupListings, type ListingGroup } from '../grouping'
 import { CopyButton } from './CopyButton'
 import { DestinationHint } from './DestinationHint'
 
@@ -48,9 +50,12 @@ interface Props {
    * filter row is gone and Settings owns it.
    */
   includeNSFW: boolean
+
+  /** How versions of one upstream model collapse into a card. */
+  grouping: GroupingMode
 }
 
-export function BrowsePanel({ hidden, includeNSFW }: Props) {
+export function BrowsePanel({ hidden, includeNSFW, grouping }: Props) {
   const [query, setQuery] = useState<BrowseQuery>(emptyBrowseQuery)
   const [draft, setDraft] = useState('')
   const [results, setResults] = useState<BrowseResults | null>(null)
@@ -192,6 +197,14 @@ export function BrowsePanel({ hidden, includeNSFW }: Props) {
     run(query)
   }, [query, run])
 
+  // Collapsed here rather than server-side: a browse page is the provider's
+  // own page, so every version of a grouped model is already in this payload
+  // and the version picker costs no extra request.
+  const groups = useMemo(
+    () => groupListings(results?.items ?? [], grouping),
+    [results, grouping],
+  )
+
   // Functional updates: two quick clicks in one React batch must not build
   // the second state from the first's stale snapshot.
   const toggle = (key: 'providers' | 'type', value: string) => {
@@ -311,13 +324,14 @@ export function BrowsePanel({ hidden, includeNSFW }: Props) {
       )}
 
       <div className="listing-grid">
-        {results?.items.map((l) => (
+        {groups.map((g) => (
           <ListingCard
-            key={`${l.provider}:${l.id}:${l.version_id ?? ''}`}
-            listing={l}
+            key={g.key}
+            group={g}
             destRoot={destRoot}
             canDownload={canDownload}
-            job={jobFor(jobs, l, jobIdByUrl)}
+            jobs={jobs}
+            jobIdByUrl={jobIdByUrl}
             onStarted={(id, url) => {
               if (id && url) setJobIdByUrl((m) => ({ ...m, [url]: id }))
               listDownloads().then(setJobs).catch(() => {})
@@ -349,22 +363,39 @@ export function BrowsePanel({ hidden, includeNSFW }: Props) {
 }
 
 function ListingCard({
-  listing,
+  group,
   destRoot,
   canDownload,
-  job,
+  jobs,
+  jobIdByUrl,
   onStarted,
 }: {
-  listing: Listing
+  group: ListingGroup
   destRoot: string
   canDownload: boolean
-  job?: DownloadJob
+  jobs: DownloadJob[]
+  jobIdByUrl: Record<string, string>
   onStarted: (id?: string, url?: string) => void
 }) {
-  const status = listing.local?.status ?? 'new'
+  // Which version this card is showing. Starts at the group's primary -- the
+  // one you already own, if any -- and resets when the group changes underneath
+  // it, which a new search does.
+  const [selectedID, setSelectedID] = useState<string | undefined>(group.primary.version_id)
+  useEffect(() => setSelectedID(group.primary.version_id), [group.primary.version_id])
+
+  const listing =
+    group.versions.find((v) => v.version_id === selectedID) ?? group.primary
+
+  // The group's verdict, not the selected version's: a card whose newest
+  // version you own says "have" even while showing an older one.
+  const status = group.status
   const file = pickFile(listing.files)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+
+  // Resolved from the selected version, so switching versions does not show
+  // another version's download progress on this card.
+  const job = jobFor(jobs, listing, jobIdByUrl)
 
   // Shared by the Download and Retry buttons: same request, different label.
   const start = async () => {
@@ -411,12 +442,14 @@ function ListingCard({
       <div className="listing-body">
         <div className="listing-head">
           <h3>{listing.name}</h3>
-          <StatusBadge listing={listing} />
+          <StatusBadge group={group} />
         </div>
 
         <div className="listing-meta">
           <span className="provider-badge">{listing.provider}</span>
-          {listing.version_name && <span>{listing.version_name}</span>}
+          {/* Only when there is nothing to pick from: with a picker below, the
+              version is already named there, twice would be noise. */}
+          {group.versions.length === 1 && listing.version_name && <span>{listing.version_name}</span>}
           {listing.type && <span>{listing.type}</span>}
           {listing.base_model && <span>{listing.base_model}</span>}
           {file?.size_bytes ? <span>{formatBytes(file.size_bytes)}</span> : null}
@@ -425,6 +458,14 @@ function ListingCard({
               where it was the one thing that could still wrap it. */}
           {file?.requires_auth && <span>needs an API key</span>}
         </div>
+
+        {group.versions.length > 1 && (
+          <VersionPicker
+            group={group}
+            selected={listing}
+            onSelect={(v) => setSelectedID(v.version_id)}
+          />
+        )}
 
         {listing.trigger_words && listing.trigger_words.length > 0 && (
           <div className="trigger-list">
@@ -499,13 +540,84 @@ function ListingCard({
   )
 }
 
-function StatusBadge({ listing }: { listing: Listing }) {
-  const local = listing.local
-  if (!local || local.status === 'new') return <span className="badge new-badge">new</span>
+/**
+ * Lets you switch which version a grouped card is showing.
+ *
+ * Chips up to five, a dropdown past that: a model with 20 versions would
+ * otherwise put a wall of chips inside every card, and the count varies enough
+ * between models that picking one control for both looks wrong at one end or
+ * the other.
+ */
+function VersionPicker({
+  group,
+  selected,
+  onSelect,
+}: {
+  group: ListingGroup
+  selected: Listing
+  onSelect: (v: Listing) => void
+}) {
+  // Falls back to the file name when the provider names no version. CivArchive
+  // routinely reports neither a version name nor an id, which left a picker of
+  // identical "version" entries -- real options the user could not tell apart.
+  // The file name is the one thing that does differ, and it is real data rather
+  // than an invented ordinal.
+  const label = (v: Listing) =>
+    v.version_name || v.version_id || pickFile(v.files)?.name || 'version'
+  const owned = (v: Listing) => v.local?.status === 'have'
 
-  if (local.status === 'have') {
+  if (group.versions.length > 5) {
     return (
-      <span className="badge have-badge" title={local.path || 'already in the library'}>
+      <label className="version-picker">
+        <span className="source-note">{group.versions.length} versions</span>
+        <select
+          value={selected.version_id ?? ''}
+          onChange={(e) => {
+            const next = group.versions.find((v) => v.version_id === e.target.value)
+            if (next) onSelect(next)
+          }}
+        >
+          {group.versions.map((v) => (
+            <option key={v.version_id ?? label(v)} value={v.version_id ?? ''}>
+              {label(v)}
+              {owned(v) ? ' — in your library' : ''}
+            </option>
+          ))}
+        </select>
+      </label>
+    )
+  }
+
+  return (
+    <div className="version-picker chip-row">
+      {group.versions.map((v) => (
+        <button
+          key={v.version_id ?? label(v)}
+          className={`chip${v.version_id === selected.version_id ? ' on' : ''}${owned(v) ? ' owned' : ''}`}
+          title={owned(v) ? 'already in your library' : undefined}
+          onClick={() => onSelect(v)}
+        >
+          {label(v)}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * The group's status, not the shown version's.
+ *
+ * A card showing an older version of a model you own must not say "new" just
+ * because that particular version is not the one on disk -- which is what the
+ * per-listing status says, correctly, for its own row.
+ */
+function StatusBadge({ group }: { group: ListingGroup }) {
+  if (group.status === 'new') return <span className="badge new-badge">new</span>
+
+  if (group.status === 'have') {
+    const path = group.versions.find((v) => v.local?.status === 'have')?.local?.path
+    return (
+      <span className="badge have-badge" title={path || 'already in the library'}>
         have
       </span>
     )
@@ -513,7 +625,7 @@ function StatusBadge({ listing }: { listing: Listing }) {
   return (
     <span
       className="badge update-badge"
-      title={local.have_version_name ? `you have ${local.have_version_name}` : 'newer version'}
+      title={group.haveVersionName ? `you have ${group.haveVersionName}` : 'newer version'}
     >
       update
     </span>

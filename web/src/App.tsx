@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
+  DEFAULT_GROUPING,
   DEFAULT_INCLUDE_NSFW,
   DEFAULT_THUMB_ASPECT,
   MODEL_TYPES,
   SETTING_BROWSE_NSFW,
   SETTING_FILTERS,
+  SETTING_GROUPING,
   SETTING_THUMB_ASPECT,
+  asGroupingMode,
   asThumbAspect,
   config,
   deleteSetting,
@@ -16,6 +19,7 @@ import {
   searchModels,
   type Facets,
   type Filters,
+  type GroupingMode,
   type SearchHit,
   type ThumbAspect,
 } from './api'
@@ -57,6 +61,7 @@ export function App() {
   // filters -- one round trip, not three.
   const [thumbAspect, setThumbAspect] = useState<ThumbAspect>(DEFAULT_THUMB_ASPECT)
   const [includeNSFW, setIncludeNSFW] = useState(DEFAULT_INCLUDE_NSFW)
+  const [grouping, setGrouping] = useState<GroupingMode>(DEFAULT_GROUPING)
 
   useEffect(() => {
     getSettings()
@@ -66,6 +71,7 @@ export function App() {
         setThumbAspect(asThumbAspect(s[SETTING_THUMB_ASPECT]))
         // Absent means the default, which is on. Only an explicit false is off.
         setIncludeNSFW(s[SETTING_BROWSE_NSFW] === undefined ? DEFAULT_INCLUDE_NSFW : !!s[SETTING_BROWSE_NSFW])
+        setGrouping(asGroupingMode(s[SETTING_GROUPING]))
       })
       .catch(() => {
         /* a preference that will not load is not a reason to show nothing */
@@ -80,6 +86,7 @@ export function App() {
   const onPreferenceChanged = useCallback((key: string, value: unknown) => {
     if (key === SETTING_THUMB_ASPECT) setThumbAspect(asThumbAspect(value))
     if (key === SETTING_BROWSE_NSFW) setIncludeNSFW(!!value)
+    if (key === SETTING_GROUPING) setGrouping(asGroupingMode(value))
   }, [])
 
   // Persist after the load has settled, so the initial default state cannot
@@ -268,7 +275,7 @@ export function App() {
           replay the mount effects (and their provider requests) on every
           Library-Browse round trip, and lose results, destination choice and
           the visible download queue mid-transfer. */}
-      <BrowsePanel hidden={tab !== 'browse'} includeNSFW={includeNSFW} />
+      <BrowsePanel hidden={tab !== 'browse'} includeNSFW={includeNSFW} grouping={grouping} />
 
       <SettingsPanel
         hidden={tab !== 'settings'}

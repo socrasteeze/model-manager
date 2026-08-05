@@ -697,6 +697,23 @@ input:focus, select:focus, textarea:focus {
   border: 1px solid var(--border);
 }
 
+/* Version chooser inside a grouped card. Sits between the meta row and the
+   trigger words: it changes what the rest of the card describes, so it has to
+   read as part of the card's identity rather than as an action. */
+.version-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  margin: 0.15rem 0;
+}
+.version-picker select { width: auto; flex: 1; min-width: 0; padding: 3px 6px; font-size: 0.82rem; }
+.version-picker .chip { font-size: 0.78rem; padding: 0.15rem 0.55rem; }
+/* A version already on disk, so the picker answers "which of these do I have"
+   without opening every one. */
+.version-picker .chip.owned { border-color: var(--accent); }
+.version-picker .chip.owned::before { content: '¹3 a0'; color: var(--accent); }
+
 .listing-actions {
   grid-area: actions;
   display: flex;

@@ -9,6 +9,12 @@ Every entry links to the full release notes for that version.
 
 ### Added
 
+- Browse now groups versions of the same model into one card with a version
+  picker. Searching for a popular model used to return eight cards with the
+  same name, because each version is its own search result. By default,
+  versions built for different base models stay apart, since one is not a
+  drop-in replacement for the other; Settings can widen this to group them all,
+  or turn grouping off.
 - The library now marks models that have a newer version upstream, with a
   "Needs update" filter beside the other filters. The mark says which version
   you have, which one is newer, and when the check ran.
