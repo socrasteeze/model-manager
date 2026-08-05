@@ -5,6 +5,17 @@ list internal refactors with no visible effect.
 
 Every entry links to the full release notes for that version.
 
+## [v0.4.1](docs/release-notes/v0.4.1.md) — 2026-08-04
+
+### Fixed
+
+- A fresh install with no directories added showed a "Nothing matches" search
+  result with CLI instructions. It's now a setup screen with a button onto
+  Settings, where directories have always been addable.
+- The owned-version chip in Browse's version picker rendered as garbage
+  characters instead of a check mark, from an escaping bug in the v0.4.0
+  build.
+
 ## [v0.4.0](docs/release-notes/v0.4.0.md) — 2026-08-04
 
 ### Added

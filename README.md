@@ -46,11 +46,10 @@ and what that measurably costs.
 
 ## Install
 
-**Current release: [v0.4.0](../../releases/tag/v0.4.0)** — version grouping in
-Browse and the library, a saved "needs update" mark and filter, portrait
-thumbnails, and a round of UI fixes. See its
-[release notes](docs/release-notes/v0.4.0.md); one schema migration applies
-itself and nothing needs running by hand.
+**Current release: [v0.4.1](../../releases/tag/v0.4.1)** — fixes a broken
+empty-library first run and a garbled version-chip icon, both introduced in
+v0.4.0. See its [release notes](docs/release-notes/v0.4.1.md); nothing needs
+running by hand.
 
 Download the binary for your platform from the
 [latest release](../../releases/latest) — one file, nothing to install. Windows
