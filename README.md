@@ -46,10 +46,9 @@ and what that measurably costs.
 
 ## Install
 
-**Current release: [v0.4.1](../../releases/tag/v0.4.1)** — fixes a broken
-empty-library first run and a garbled version-chip icon, both introduced in
-v0.4.0. See its [release notes](docs/release-notes/v0.4.1.md); nothing needs
-running by hand.
+**Current release: [v0.4.2](../../releases/tag/v0.4.2)** — makes the per-type
+download folder fields in Settings typable again. See its
+[release notes](docs/release-notes/v0.4.2.md); nothing needs running by hand.
 
 Download the binary for your platform from the
 [latest release](../../releases/latest) — one file, nothing to install. Windows

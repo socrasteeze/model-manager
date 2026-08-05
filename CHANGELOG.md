@@ -5,6 +5,14 @@ list internal refactors with no visible effect.
 
 Every entry links to the full release notes for that version.
 
+## [v0.4.2](docs/release-notes/v0.4.2.md) — 2026-08-05
+
+### Fixed
+
+- The per-type download folder fields in Settings lost focus after every
+  character typed, making them effectively unusable. They now save when you
+  leave the field, like every other text setting on that panel.
+
 ## [v0.4.1](docs/release-notes/v0.4.1.md) — 2026-08-04
 
 ### Fixed
