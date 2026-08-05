@@ -153,6 +153,23 @@ func Enrich(ctx context.Context, st *store.Store, opts EnrichOptions) (*EnrichSt
 			}
 		}
 
+		// Persist which remote model this file is, alongside the observations.
+		// Same data the archive already holds -- a row here is only what lets
+		// it be joined and indexed rather than re-parsed on every browse.
+		//
+		// Non-fatal: the observations are the product of this loop, and losing
+		// an identity row costs an entry in a table the backfill rebuilds
+		// anyway. Failing the model over it would be the wrong trade.
+		if modelID, versionID, versionName := decodeOwnedVersion(ProviderCivitai, string(raw)); modelID != "" && modelID != "0" {
+			if err := st.PutModelOrigin(store.ModelOrigin{
+				SHA256: sha, Provider: ProviderCivitai,
+				ModelID: modelID, VersionID: versionID, VersionName: versionName,
+				Source: store.OriginSourceArchive,
+			}); err != nil {
+				logf("%s: origin identity: %v", short(sha), err)
+			}
+		}
+
 		if !opts.SkipImages && opts.Blobs != nil {
 			n := fetchImages(ctx, opts, st, sha, images)
 			stats.Images += n

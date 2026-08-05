@@ -83,16 +83,52 @@ func BuildLocalIndex(st *store.Store) (*LocalIndex, error) {
 
 // loadOwnedVersions reconstructs which remote model each local file came from.
 //
-// The archived response is the source rather than a dedicated column because it
-// is already stored in full and never expired (§12.1); deriving from it means
-// update detection works retroactively for everything enriched before this
-// feature existed, with no re-fetch and no migration.
+// Two sources, in order. The persisted model_origin rows are the fast path:
+// indexed, joinable, and what the library's update badge and version grouping
+// are actually built on.
+//
+// The archive scan behind it is kept rather than replaced, because it is what
+// buys the property that made deriving-from-the-archive right in the first
+// place: update detection works retroactively for everything enriched before
+// any of this existed, with no re-fetch. It is anti-joined against the
+// persisted rows, so on a backfilled database it matches nothing and costs one
+// indexed lookup; on a database that has not been backfilled it is byte-for-
+// byte the old behaviour.
 func (idx *LocalIndex) loadOwnedVersions(st *store.Store) error {
+	persisted, err := st.DB().Query(`
+        SELECT provider, origin_model_id, origin_version_id, origin_version_name, sha256
+          FROM model_origin
+         WHERE provider IN (?, ?)`, ProviderCivitaiID, ProviderCivArchiveID)
+	if err != nil {
+		return fmt.Errorf("origin: reading persisted origins: %w", err)
+	}
+	for persisted.Next() {
+		var provider, modelID, versionID, versionName, sha string
+		if err := persisted.Scan(&provider, &modelID, &versionID, &versionName, &sha); err != nil {
+			persisted.Close()
+			return err
+		}
+		mk := provider + "/" + modelID
+		idx.ownedVersions[mk] = append(idx.ownedVersions[mk], ownedVersion{
+			VersionID:   versionID,
+			VersionName: versionName,
+			SHA256:      strings.ToUpper(sha),
+		})
+	}
+	persisted.Close()
+	if err := persisted.Err(); err != nil {
+		return err
+	}
+
 	rows, err := st.DB().Query(`
-        SELECT provider, lookup_key, raw_response
-          FROM origin_cache
-         WHERE found = 1 AND raw_response IS NOT NULL
-           AND provider IN (?, ?)`, ProviderCivitaiID, ProviderCivArchiveID)
+        SELECT c.provider, c.lookup_key, c.raw_response
+          FROM origin_cache c
+         WHERE c.found = 1 AND c.raw_response IS NOT NULL
+           AND c.provider IN (?, ?)
+           AND NOT EXISTS (SELECT 1 FROM model_origin mo
+                            WHERE mo.sha256 = lower(c.lookup_key)
+                              AND mo.provider = c.provider)`,
+		ProviderCivitaiID, ProviderCivArchiveID)
 	if err != nil {
 		return fmt.Errorf("origin: indexing owned versions: %w", err)
 	}
@@ -133,6 +169,75 @@ func (idx *LocalIndex) loadOwnedVersions(st *store.Store) error {
 		})
 	}
 	return nil
+}
+
+// BackfillModelOrigin decodes archived responses into persisted identity rows.
+//
+// Idempotent and cheap: it only looks at rows model_origin does not already
+// cover, so re-running it costs one anti-join. Called at the start of an update
+// sweep, after enrichment, and once on a writable daemon's startup.
+//
+// Joined against model_file rather than trusting the archive's key, because
+// origin_cache is deliberately never pruned -- an archived response can outlive
+// the file it described, and model_origin.sha256 is a foreign key. Skipping
+// those orphans here is also why the backfill has to be re-runnable: a scan
+// that re-indexes a file which came back must be able to pick it up.
+func BackfillModelOrigin(st *store.Store) (int, error) {
+	rows, err := st.DB().Query(`
+        SELECT c.provider, c.lookup_key, c.raw_response
+          FROM origin_cache c
+          JOIN model_file f ON f.sha256 = lower(c.lookup_key)
+         WHERE c.found = 1 AND c.raw_response IS NOT NULL
+           AND c.provider IN (?, ?)
+           AND NOT EXISTS (SELECT 1 FROM model_origin mo
+                            WHERE mo.sha256 = lower(c.lookup_key)
+                              AND mo.provider = c.provider)`,
+		ProviderCivitaiID, ProviderCivArchiveID)
+	if err != nil {
+		return 0, fmt.Errorf("origin: selecting rows to backfill: %w", err)
+	}
+
+	type pending struct{ provider, sha, raw string }
+	var todo []pending
+	for rows.Next() {
+		var p pending
+		var raw sql.NullString
+		if err := rows.Scan(&p.provider, &p.sha, &raw); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if raw.Valid && raw.String != "" {
+			p.raw = raw.String
+			todo = append(todo, p)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	// Read fully before writing: the store serializes writers on one mutex, and
+	// holding a read cursor open across every write is how a single-writer
+	// SQLite setup finds new ways to block on itself.
+	written := 0
+	for _, p := range todo {
+		modelID, versionID, versionName := decodeOwnedVersion(p.provider, p.raw)
+		// A body this decoder cannot read is skipped, not fatal. It is one
+		// model's identity, and failing the whole backfill over it would take
+		// the update sweep with it.
+		if modelID == "" || modelID == "0" {
+			continue
+		}
+		if err := st.PutModelOrigin(store.ModelOrigin{
+			SHA256: strings.ToLower(p.sha), Provider: p.provider,
+			ModelID: modelID, VersionID: versionID, VersionName: versionName,
+			Source: store.OriginSourceArchive,
+		}); err != nil {
+			return written, err
+		}
+		written++
+	}
+	return written, nil
 }
 
 // decodeOwnedVersion extracts (modelID, versionID, versionName) from an
