@@ -456,4 +456,156 @@ ALTER TABLE preview_image ADD COLUMN workflow_sha256 TEXT;
 CREATE INDEX idx_preview_rank
     ON preview_image (sha256, source, position);
 `,
+
+	// --- 6: persisted origin identity and upstream update status -------------
+	//
+	// Which remote model a local file was published as was, until now,
+	// re-derived on every BuildLocalIndex by JSON-parsing every archived
+	// origin_cache.raw_response in Go (origin/annotate.go loadOwnedVersions).
+	// That is correct and works retroactively -- the archive is complete and
+	// never expired -- but it is O(whole archive) per browse request, it cannot
+	// be joined or filtered in SQL, and it cannot be indexed. So neither "which
+	// of my models has a newer version" nor "show me every copy I hold of this
+	// upstream model" could be expressed as a query at all.
+	//
+	// DDL only. The backfill is origin.BackfillModelOrigin, in Go, deliberately:
+	// a SQL backfill would need json_extract, and nothing in this repo uses
+	// SQLite's JSON1 extension today. If the driver were ever built without it
+	// this migration would fail inside migrate(), and the daemon would refuse to
+	// open every existing database -- an unrecoverable startup failure for all
+	// users, traded for a convenience. It also could not decode CivArchive's
+	// variant key spellings, which the Go decoder already handles.
+	`
+CREATE TABLE model_origin (
+    sha256              TEXT NOT NULL REFERENCES model_file(sha256) ON DELETE CASCADE,
+
+    -- Part of the key, not a column: civitai and civarchive mirror each
+    -- other's model ids, and annotate.go already resolves a model under both.
+    -- A sha-keyed table could only record one of them.
+    provider            TEXT NOT NULL,
+
+    -- TEXT, not INTEGER, matching origin.Listing.ID/VersionID. Providers are
+    -- not obliged to number their models forever, and a non-numeric id must
+    -- round-trip rather than silently become 0.
+    origin_model_id     TEXT NOT NULL,
+    origin_version_id   TEXT NOT NULL DEFAULT '',
+    origin_version_name TEXT NOT NULL DEFAULT '',
+
+    -- 'archive' (decoded from a stored response) or 'download' (the version
+    -- the user actually asked for). Recorded because the first is an inference
+    -- from an archived body and the second is direct evidence; a later decoder
+    -- fix should be able to redo one without touching the other.
+    source              TEXT NOT NULL DEFAULT 'archive',
+    updated_at          TEXT NOT NULL,
+
+    PRIMARY KEY (sha256, provider)
+) STRICT;
+
+-- Every local copy of one upstream model in one seek. Serves the update badge
+-- and version grouping equally; grouping is why this is an index on the pair
+-- rather than on origin_model_id alone.
+CREATE INDEX idx_model_origin_model ON model_origin (provider, origin_model_id);
+
+CREATE TABLE origin_model_status (
+    provider            TEXT NOT NULL,
+    origin_model_id     TEXT NOT NULL,
+
+    latest_version_id   TEXT NOT NULL DEFAULT '',
+    latest_version_name TEXT NOT NULL DEFAULT '',
+    latest_published_at TEXT NOT NULL DEFAULT '',
+    latest_base_model   TEXT NOT NULL DEFAULT '',
+
+    -- The newest version's primary file. Stored LOWER-CASE, because providers
+    -- report uppercase hex (origin.RemoteFile.SHA256) and model_file.sha256 is
+    -- lower -- a mixed-case comparison here would never match and the badge
+    -- would never clear after the update was installed.
+    --
+    -- Kept mainly so ownership can be settled by CONTENT: once these bytes are
+    -- indexed under any path the update has been applied, whether or not the
+    -- new file has been enriched yet. That is what makes the badge
+    -- self-clearing (see the view below).
+    latest_file_sha256  TEXT NOT NULL DEFAULT '',
+    latest_size_bytes   INTEGER NOT NULL DEFAULT 0,
+    latest_download_url TEXT NOT NULL DEFAULT '',
+    latest_page_url     TEXT NOT NULL DEFAULT '',
+
+    checked_at          TEXT NOT NULL,
+
+    -- The last check's outcome, so a sweep that could not reach the provider
+    -- stays distinguishable from one that found nothing new. A failed check
+    -- never clears a known latest_version_id: the same rule origin_cache
+    -- applies, where a later 404 must not erase an archived body.
+    http_status         INTEGER NOT NULL DEFAULT 0,
+    last_error          TEXT NOT NULL DEFAULT '',
+
+    PRIMARY KEY (provider, origin_model_id)
+) STRICT;
+
+-- "Has a newer version" as a query, not a stored flag.
+--
+-- A boolean column on model_origin was the obvious design and is rejected: the
+-- moment the user downloads the update the flag is a lie, and every write path
+-- that could make it one -- a scan indexing the new file, an enrichment
+-- recording its version, a delete -- would need its own invalidation hook.
+-- That is exactly the silently-stale-value pattern field_value exists to
+-- prevent. Here nothing is flagged: two facts are stored (which versions are
+-- owned, what the newest one is) and the answer is their comparison, so
+-- applying an update clears the badge with no invalidation code anywhere.
+--
+-- The exclusions mirror origin.CheckUpdates one-for-one, so the badge, the CLI
+-- and the browse annotator cannot drift into meaning different things:
+--   1. some local file already records the latest version id;
+--   2. the latest version's own file hash is already indexed, possibly under a
+--      different model and not yet enriched;
+--   3. this row is not the newest copy held -- keeping v3 beside v5 must not
+--      badge v3 as needing v6, the same rule annotate.go's match() applies
+--      when it compares only the newest owned version;
+--   4. at most one row per local file, because a duplicate would multiply
+--      Search's result rows and break its LIMIT. Providers mirror ids, so two
+--      rows for one file are two names for one fact; lowest provider name
+--      wins, arbitrarily but deterministically.
+CREATE VIEW model_update AS
+SELECT mo.sha256,
+       mo.provider,
+       mo.origin_model_id,
+       mo.origin_version_id     AS have_version_id,
+       mo.origin_version_name   AS have_version_name,
+       s.latest_version_id,
+       s.latest_version_name,
+       s.latest_published_at,
+       s.latest_base_model,
+       s.latest_file_sha256,
+       s.latest_size_bytes,
+       s.latest_download_url,
+       s.latest_page_url,
+       s.checked_at
+  FROM model_origin mo
+  JOIN origin_model_status s
+    ON s.provider = mo.provider
+   AND s.origin_model_id = mo.origin_model_id
+ WHERE s.latest_version_id <> ''
+   AND NOT EXISTS (SELECT 1 FROM model_origin o
+                    WHERE o.provider = mo.provider
+                      AND o.origin_model_id = mo.origin_model_id
+                      AND o.origin_version_id = s.latest_version_id)
+   AND (s.latest_file_sha256 = ''
+        OR NOT EXISTS (SELECT 1 FROM model_file mf
+                        WHERE mf.sha256 = s.latest_file_sha256))
+   -- CAST, because version ids are numeric strings. One divergence from
+   -- origin.numericID is worth naming: SQLite CASTs a non-numeric id to 0
+   -- where Go returns -1, so such an id sorts differently. Civitai version
+   -- ids are always numeric; this can only bite a malformed CivArchive record.
+   AND NOT EXISTS (SELECT 1 FROM model_origin o
+                    WHERE o.provider = mo.provider
+                      AND o.origin_model_id = mo.origin_model_id
+                      AND CAST(o.origin_version_id AS INTEGER)
+                        > CAST(mo.origin_version_id AS INTEGER))
+   AND NOT EXISTS (SELECT 1 FROM model_origin o
+                     JOIN origin_model_status s2
+                       ON s2.provider = o.provider
+                      AND s2.origin_model_id = o.origin_model_id
+                    WHERE o.sha256 = mo.sha256
+                      AND o.provider < mo.provider
+                      AND s2.latest_version_id <> '');
+`,
 }
