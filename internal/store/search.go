@@ -39,6 +39,13 @@ type SearchQuery struct {
 	// -- use case 10, spotting the gaps.
 	NeedsAttention bool
 
+	// Group collapses versions of one upstream model into a single row:
+	// "architecture" (same model and base model), "model" (same model, any
+	// base model), or "" / "off" for no collapsing.
+	//
+	// Deliberately NOT applied by SearchSHAs; see the note there.
+	Group string
+
 	// Sort is one of name, size, recent, added. Defaults to name.
 	Sort   string
 	Desc   bool
@@ -84,6 +91,11 @@ type SearchHit struct {
 	// model. Computed on read rather than stored: it compares the record's own
 	// base_model, which the user can edit, against the upstream one.
 	UpdateBaseModelChanged bool `json:"update_base_model_changed,omitempty"`
+
+	// GroupSize is how many models this row stands for once versions are
+	// collapsed, so a card can say "3 versions" rather than silently hiding
+	// two. 1 when grouping is off or the row is alone in its group.
+	GroupSize int `json:"group_size,omitempty"`
 }
 
 // SearchResults is a page of hits.
@@ -103,11 +115,28 @@ type SearchResults struct {
 // "lora", the type facet must still count the other types or there is no way to
 // add a second one.
 func filterSQL(q SearchQuery, skip string) (string, []any) {
+	return filterSQLAs(q, skip, "f", "r")
+}
+
+// filterSQLAs is filterSQL against caller-chosen table aliases.
+//
+// Exists because version grouping needs the user's filters applied twice in
+// one statement: once to the row being considered, and once inside a subquery
+// deciding whether some *other* row of the same model should be shown instead.
+// Both must mean the same thing, or filtering to SDXL would hide a model whose
+// newest version is Pony -- the row that would have represented the group is
+// filtered out, and nothing takes its place.
+//
+// The correlated subquery needs its own aliases, so the predicate cannot be
+// hard-coded to f/r. Writing a second copy for the subquery is exactly the
+// duplication filterSQL exists to prevent.
+func filterSQLAs(q SearchQuery, skip, f, r string) (string, []any) {
 	where := []string{"1=1"}
 	args := []any{}
 
 	if text := strings.TrimSpace(q.Text); text != "" {
-		where = append(where, `f.sha256 IN (SELECT sha256 FROM model_search WHERE model_search MATCH ?)`)
+		where = append(where, fmt.Sprintf(
+			`%s.sha256 IN (SELECT sha256 FROM model_search WHERE model_search MATCH ?)`, f))
 		args = append(args, buildFTSQuery(text))
 	}
 
@@ -122,10 +151,10 @@ func filterSQL(q SearchQuery, skip string) (string, []any) {
 		}
 		where = append(where, fmt.Sprintf("%s IN (%s)", column, strings.Join(placeholders, ",")))
 	}
-	addIn("types", "r.type", q.Types)
-	addIn("base_models", "r.base_model", q.BaseModels)
-	addIn("origins", "r.origin", q.Origins)
-	addIn("formats", "f.format", q.Formats)
+	addIn("types", r+".type", q.Types)
+	addIn("base_models", r+".base_model", q.BaseModels)
+	addIn("origins", r+".origin", q.Origins)
+	addIn("formats", f+".format", q.Formats)
 
 	if len(q.Tags) > 0 && skip != "tags" {
 		// Every requested tag must be present, not any of them: narrowing is the
@@ -138,8 +167,8 @@ func filterSQL(q SearchQuery, skip string) (string, []any) {
 		where = append(where, fmt.Sprintf(`(
             SELECT COUNT(DISTINCT t.name) FROM model_tag mt
               JOIN tag t ON t.id = mt.tag_id
-             WHERE mt.sha256 = f.sha256 AND t.name IN (%s)
-        ) = %d`, strings.Join(placeholders, ","), len(q.Tags)))
+             WHERE mt.sha256 = %s.sha256 AND t.name IN (%s)
+        ) = %d`, f, strings.Join(placeholders, ","), len(q.Tags)))
 	}
 
 	if q.HasPreview != nil {
@@ -147,11 +176,11 @@ func filterSQL(q SearchQuery, skip string) (string, []any) {
 		if !*q.HasPreview {
 			clause = "NOT EXISTS"
 		}
-		where = append(where,
-			clause+` (SELECT 1 FROM preview_image pi WHERE pi.sha256 = f.sha256)`)
+		where = append(where, fmt.Sprintf(
+			`%s (SELECT 1 FROM preview_image pi WHERE pi.sha256 = %s.sha256)`, clause, f))
 	}
 	if q.NSFW != nil {
-		where = append(where, "r.nsfw = ?")
+		where = append(where, r+".nsfw = ?")
 		args = append(args, boolInt(*q.NSFW))
 	}
 	if q.Present != nil {
@@ -159,8 +188,9 @@ func filterSQL(q SearchQuery, skip string) (string, []any) {
 		if !*q.Present {
 			clause = "NOT EXISTS"
 		}
-		where = append(where,
-			clause+` (SELECT 1 FROM model_file_path p WHERE p.sha256 = f.sha256 AND p.present = 1)`)
+		where = append(where, fmt.Sprintf(
+			`%s (SELECT 1 FROM model_file_path p WHERE p.sha256 = %s.sha256 AND p.present = 1)`,
+			clause, f))
 	}
 	if q.NeedsUpdate != nil && skip != "needs_update" {
 		clause := "EXISTS"
@@ -172,17 +202,98 @@ func filterSQL(q SearchQuery, skip string) (string, []any) {
 		// definition. filterSQL exists because Search and FacetCounts once
 		// disagreed about what a row was; a second spelling of "needs update"
 		// sitting beside it would reintroduce exactly that.
-		where = append(where,
-			clause+` (SELECT 1 FROM model_update u WHERE u.sha256 = f.sha256)`)
+		where = append(where, fmt.Sprintf(
+			`%s (SELECT 1 FROM model_update u WHERE u.sha256 = %s.sha256)`, clause, f))
 	}
 	if q.NeedsAttention {
-		where = append(where, `(
-            r.name IS NULL OR r.base_model IS NULL
-            OR NOT EXISTS (SELECT 1 FROM preview_image pi WHERE pi.sha256 = f.sha256)
-        )`)
+		where = append(where, fmt.Sprintf(`(
+            %[2]s.name IS NULL OR %[2]s.base_model IS NULL
+            OR NOT EXISTS (SELECT 1 FROM preview_image pi WHERE pi.sha256 = %[1]s.sha256)
+        )`, f, r))
 	}
 
 	return strings.Join(where, " AND "), args
+}
+
+// collapseSQL keeps only one row per group of versions of the same model.
+//
+// A row filter, not a GROUP BY. Keeping the representative row means LIMIT,
+// OFFSET, COUNT(*) and every sort keep working untouched, and the facet counts
+// stay computed over the same set the results come from -- which a GROUP BY
+// would quietly break for both.
+//
+// The representative is the newest version owned, tie-broken by sha so the
+// choice is stable across runs rather than dependent on row order.
+//
+// A model with no recorded origin identity is never collapsed: without knowing
+// which upstream model it belongs to there is no group to collapse it into,
+// and hiding it would be inventing a relationship from nothing.
+//
+// The user's own filters are repeated inside, against the subquery's aliases,
+// so a row is only suppressed in favour of one that is itself visible. Without
+// that, filtering to SDXL would hide a model whose newest version is Pony: the
+// row that would have represented the group is filtered out of the results and
+// nothing takes its place.
+func collapseSQL(q SearchQuery, mode string) (string, []any) {
+	if mode != "architecture" && mode != "model" {
+		return "", nil
+	}
+
+	inner, args := filterSQLAs(q, "", "f2", "r2")
+
+	sameArchitecture := ""
+	if mode == "architecture" {
+		// COALESCE, not =, so two versions that both lack a base model group
+		// together rather than each becoming its own card: in SQL NULL = NULL
+		// is NULL, which is not true.
+		sameArchitecture = `AND COALESCE(r2.base_model, '') = COALESCE(r.base_model, '')`
+	}
+
+	return fmt.Sprintf(`NOT EXISTS (
+        SELECT 1
+          FROM model_origin mo_self
+          JOIN model_origin mo_other
+            ON mo_other.provider = mo_self.provider
+           AND mo_other.origin_model_id = mo_self.origin_model_id
+          JOIN model_file f2 ON f2.sha256 = mo_other.sha256
+          LEFT JOIN model_record r2 ON r2.sha256 = f2.sha256
+         WHERE mo_self.sha256 = f.sha256
+           AND f2.sha256 <> f.sha256
+           %s
+           AND (%s)
+           AND (CAST(mo_other.origin_version_id AS INTEGER)
+                  > CAST(mo_self.origin_version_id AS INTEGER)
+                OR (CAST(mo_other.origin_version_id AS INTEGER)
+                      = CAST(mo_self.origin_version_id AS INTEGER)
+                    AND f2.sha256 < f.sha256))
+    )`, sameArchitecture, inner), args
+}
+
+// groupSizeSQL counts how many models the row stands for, so a collapsed card
+// can say "3 versions" rather than silently hiding two.
+func groupSizeSQL(q SearchQuery, mode string) (string, []any) {
+	if mode != "architecture" && mode != "model" {
+		return "1", nil
+	}
+
+	inner, args := filterSQLAs(q, "", "f3", "r3")
+	sameArchitecture := ""
+	if mode == "architecture" {
+		sameArchitecture = `AND COALESCE(r3.base_model, '') = COALESCE(r.base_model, '')`
+	}
+
+	return fmt.Sprintf(`COALESCE((
+        SELECT COUNT(*)
+          FROM model_origin mo_self
+          JOIN model_origin mo_other
+            ON mo_other.provider = mo_self.provider
+           AND mo_other.origin_model_id = mo_self.origin_model_id
+          JOIN model_file f3 ON f3.sha256 = mo_other.sha256
+          LEFT JOIN model_record r3 ON r3.sha256 = f3.sha256
+         WHERE mo_self.sha256 = f.sha256
+           %s
+           AND (%s)
+    ), 1)`, sameArchitecture, inner), args
 }
 
 // SearchSHAs returns every model matching a query, ignoring Limit and Offset.
@@ -231,6 +342,15 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
 
 	whereSQL, args := filterSQL(q, "")
 
+	// The collapse is part of the WHERE clause, so the count, the page and the
+	// sort all see the same set. Its args come first because they are
+	// interpolated after the base predicate but bind in statement order.
+	collapse, collapseArgs := collapseSQL(q, q.Group)
+	if collapse != "" {
+		whereSQL += " AND " + collapse
+		args = append(args, collapseArgs...)
+	}
+
 	var total int
 	countSQL := `SELECT COUNT(*) FROM model_file f
                    LEFT JOIN model_record r ON r.sha256 = f.sha256
@@ -253,6 +373,8 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
 		direction = "DESC"
 	}
 
+	groupSize, groupSizeArgs := groupSizeSQL(q, q.Group)
+
 	// sha256 as the final key gives a total order, so paging cannot show or skip
 	// a row because two records tied on the sort column.
 	querySQL := fmt.Sprintf(`
@@ -270,18 +392,21 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
                (SELECT COUNT(*) FROM model_file_path p WHERE p.sha256 = f.sha256 AND p.present = 1),
                COALESCE(u.have_version_name, ''), COALESCE(u.latest_version_name, ''),
                COALESCE(u.checked_at, ''), COALESCE(u.latest_base_model, ''),
-               u.sha256 IS NOT NULL
+               u.sha256 IS NOT NULL,
+               %[4]s
           FROM model_file f
           LEFT JOIN model_record r ON r.sha256 = f.sha256
           -- Safe as a LEFT JOIN only because the view guarantees at most one
           -- row per sha; a duplicate would multiply result rows and break the
           -- LIMIT below. Pinned by TestOneRowPerFileWithTwoOriginProviders.
           LEFT JOIN model_update u ON u.sha256 = f.sha256
-         WHERE %s
-         ORDER BY %s %s, f.sha256 ASC
-         LIMIT ? OFFSET ?`, whereSQL, order, direction)
+         WHERE %[1]s
+         ORDER BY %[2]s %[3]s, f.sha256 ASC
+         LIMIT ? OFFSET ?`, whereSQL, order, direction, groupSize)
 
-	args = append(args, q.Limit, q.Offset)
+	// groupSize is in the SELECT list, so its parameters bind before the ones
+	// in WHERE. Prepended rather than appended for that reason.
+	args = append(append(append([]any{}, groupSizeArgs...), args...), q.Limit, q.Offset)
 	rows, err := s.db.Query(querySQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: searching: %w", err)
@@ -298,7 +423,7 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
 			&h.BaseModel, &h.Version, &h.Origin, &nsfw, &triggers,
 			&h.PreviewImage, &h.Path, &h.PathCount,
 			&h.HaveVersionName, &h.LatestVersionName, &h.UpdateCheckedAt,
-			&latestBase, &h.UpdateAvailable); err != nil {
+			&latestBase, &h.UpdateAvailable, &h.GroupSize); err != nil {
 			return nil, err
 		}
 		if nsfw != nil {
@@ -496,8 +621,20 @@ func (s *Store) FacetCounts(q SearchQuery) (*Facets, error) {
 		Tags: map[string]int{},
 	}
 
+	// Applied to every facet as well as the total: a sidebar counting rows the
+	// grid collapses away is the same class of disagreement filterSQL was
+	// introduced to fix.
+	withCollapse := func(whereSQL string, args []any) (string, []any) {
+		collapse, collapseArgs := collapseSQL(q, q.Group)
+		if collapse == "" {
+			return whereSQL, args
+		}
+		return whereSQL + " AND " + collapse, append(args, collapseArgs...)
+	}
+
 	load := func(dimension, expr, query string, dest map[string]int) error {
 		whereSQL, args := filterSQL(q, dimension)
+		whereSQL, args = withCollapse(whereSQL, args)
 		sql := fmt.Sprintf(query, expr, whereSQL, expr)
 		rows, err := s.db.Query(sql, args...)
 		if err != nil {
@@ -544,6 +681,7 @@ func (s *Store) FacetCounts(q SearchQuery) (*Facets, error) {
 	// Tags need the join, so they get their own shape rather than being bent
 	// into the scalar one.
 	tagWhere, tagArgs := filterSQL(q, "tags")
+	tagWhere, tagArgs = withCollapse(tagWhere, tagArgs)
 	tagRows, err := s.db.Query(`
         SELECT t.name, COUNT(*)
           FROM model_file f
@@ -570,6 +708,7 @@ func (s *Store) FacetCounts(q SearchQuery) (*Facets, error) {
 	}
 
 	totalWhere, totalArgs := filterSQL(q, "")
+	totalWhere, totalArgs = withCollapse(totalWhere, totalArgs)
 	if err := s.db.QueryRow(`
         SELECT COUNT(*) FROM model_file f
           LEFT JOIN model_record r ON r.sha256 = f.sha256
@@ -582,6 +721,7 @@ func (s *Store) FacetCounts(q SearchQuery) (*Facets, error) {
 
 	// Its own filter lifted, like every other facet.
 	nuWhere, nuArgs := filterSQL(q, "needs_update")
+	nuWhere, nuArgs = withCollapse(nuWhere, nuArgs)
 	if err := s.db.QueryRow(`
         SELECT COUNT(*) FROM model_file f
           LEFT JOIN model_record r ON r.sha256 = f.sha256

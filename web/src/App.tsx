@@ -111,10 +111,10 @@ export function App() {
   // filters at all, so the sidebar could promise 412 loras beside twelve
   // results.
   const loadFacets = useCallback(() => {
-    getFacets(filters).then(setFacets).catch(() => {
+    getFacets(filters, grouping).then(setFacets).catch(() => {
       /* facets are a convenience; their absence must not break search */
     })
-  }, [filters])
+  }, [filters, grouping])
 
   useEffect(loadFacets, [loadFacets])
 
@@ -126,7 +126,7 @@ export function App() {
     (nextOffset: number, append: boolean) => {
       const id = ++requestId.current
       setLoading(true)
-      searchModels(filters, nextOffset, PAGE_SIZE)
+      searchModels(filters, nextOffset, PAGE_SIZE, grouping)
         .then((res) => {
           if (id !== requestId.current) return
           setHits((prev) => (append ? [...prev, ...res.hits] : res.hits))
@@ -142,7 +142,7 @@ export function App() {
           if (id === requestId.current) setLoading(false)
         })
     },
-    [filters],
+    [filters, grouping],
   )
 
   useEffect(() => {

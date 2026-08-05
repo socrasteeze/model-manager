@@ -62,6 +62,13 @@ export function ModelCard({ hit, selected, onSelect }: Props) {
         </div>
         <div className="card-foot">
           <span>{formatBytes(hit.size)}</span>
+          {/* Says the card stands for more than it shows, so a collapsed group
+              is visible rather than silently hiding the other versions. */}
+          {(hit.group_size ?? 1) > 1 && (
+            <span title={`${hit.group_size} versions of this model are in your library`}>
+              {hit.group_size} versions
+            </span>
+          )}
           {hit.path_count > 1 && <span title="copies on disk">×{hit.path_count}</span>}
         </div>
       </div>

@@ -52,6 +52,9 @@ export interface SearchHit {
   update_checked_at?: string
   /** The newer version targets a different base model: not a drop-in swap. */
   update_base_model_changed?: boolean
+
+  /** How many models this row stands for once versions are collapsed. */
+  group_size?: number
 }
 
 /**
@@ -280,8 +283,16 @@ export function filterParams(filters?: Filters): URLSearchParams {
   return params
 }
 
-export function searchModels(filters: Filters, offset = 0, limit = 60): Promise<SearchResults> {
+export function searchModels(
+  filters: Filters,
+  offset = 0,
+  limit = 60,
+  group?: string,
+): Promise<SearchResults> {
   const params = filterParams(filters)
+  // Only sent when it changes the answer, so an ungrouped request stays
+  // byte-identical to what it was before grouping existed.
+  if (group && group !== 'off') params.set('group', group)
   params.set('sort', filters.sort)
   params.set('order', filters.order)
   params.set('limit', String(limit))
@@ -514,8 +525,10 @@ export const getModel = (sha: string) => request<ModelDetail>(`/api/models/${sha
 export const getCandidates = (sha: string) => request<CandidateView[]>(`/api/models/${sha}/candidates`)
 // Facets take the same filters as the search, so the counts describe the
 // results rather than the whole library.
-export const getFacets = (filters?: Filters) => {
-  const qs = filterParams(filters).toString()
+export const getFacets = (filters?: Filters, group?: string) => {
+  const params = filterParams(filters)
+  if (group && group !== 'off') params.set('group', group)
+  const qs = params.toString()
   return request<Facets>(qs ? `/api/facets?${qs}` : '/api/facets')
 }
 export const getSuggestions = () => request<Suggestion[]>('/api/suggestions')

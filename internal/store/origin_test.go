@@ -403,3 +403,157 @@ func TestSearchReturnsOneRowPerModelWithTwoOriginProviders(t *testing.T) {
 			len(res.Hits), res.Total)
 	}
 }
+
+// --- version grouping ---------------------------------------------------------
+
+// seedVersion is a library model that is one version of an upstream model.
+func seedVersion(t *testing.T, s *Store, sha, base, modelID, versionID string) {
+	t.Helper()
+	seedSearch(t, s, seedSpec{
+		sha: sha, path: "/models/" + sha + ".safetensors",
+		name: "Model " + modelID, typ: "lora", baseModel: base,
+	})
+	seedOwned(t, s, sha, modelID, versionID)
+}
+
+func groupedSHAs(t *testing.T, s *Store, q SearchQuery) []string {
+	t.Helper()
+	res, err := s.Search(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]string, 0, len(res.Hits))
+	for _, h := range res.Hits {
+		out = append(out, h.SHA256)
+	}
+	return out
+}
+
+func TestGroupingCollapsesVersionsOfOneModel(t *testing.T) {
+	s := searchStore(t)
+	seedVersion(t, s, "v1", "SD 1.5", "42", "100")
+	seedVersion(t, s, "v2", "SD 1.5", "42", "200") // newest of this architecture
+	seedVersion(t, s, "v3", "SDXL", "42", "300")   // same model, different base
+
+	// architecture: SD 1.5 collapses to its newest; SDXL stands alone.
+	got := groupedSHAs(t, s, SearchQuery{Group: "architecture"})
+	if len(got) != 2 {
+		t.Fatalf("architecture mode returned %v, want 2 rows", got)
+	}
+
+	// model: everything under model 42 collapses to one.
+	if got := groupedSHAs(t, s, SearchQuery{Group: "model"}); len(got) != 1 {
+		t.Fatalf("model mode returned %v, want 1 row", got)
+	}
+	// ...and it is the newest version, not an arbitrary one.
+	if got := groupedSHAs(t, s, SearchQuery{Group: "model"}); got[0] != "v3" {
+		t.Errorf("model mode kept %s, want the newest version v3", got[0])
+	}
+
+	// off: every version is its own row.
+	if got := groupedSHAs(t, s, SearchQuery{}); len(got) != 3 {
+		t.Errorf("grouping off returned %v, want all 3 rows", got)
+	}
+}
+
+// The failure the alias-parameterised filterSQL exists to prevent: if the
+// collapse subquery did not repeat the user's filters, filtering to SD 1.5
+// would suppress the SD 1.5 row in favour of an SDXL row that the filter then
+// removes -- and the model would vanish from the results entirely.
+func TestGroupingDoesNotHideAModelUnderAFilter(t *testing.T) {
+	s := searchStore(t)
+	seedVersion(t, s, "old", "SD 1.5", "42", "100")
+	seedVersion(t, s, "new", "SDXL", "42", "900") // newest overall
+
+	got := groupedSHAs(t, s, SearchQuery{Group: "model", BaseModels: []string{"SD 1.5"}})
+	if len(got) != 1 || got[0] != "old" {
+		t.Fatalf("filtering to SD 1.5 returned %v, want [old] -- the model must not vanish", got)
+	}
+}
+
+// Grouping must not change what a bulk enrichment sweep covers: enriching only
+// the representative would leave every other owned version permanently stale.
+func TestSearchSHAsIgnoresGrouping(t *testing.T) {
+	s := searchStore(t)
+	seedVersion(t, s, "v1", "SD 1.5", "42", "100")
+	seedVersion(t, s, "v2", "SD 1.5", "42", "200")
+
+	shas, err := s.SearchSHAs(SearchQuery{Group: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shas) != 2 {
+		t.Errorf("SearchSHAs returned %v under grouping, want both versions", shas)
+	}
+}
+
+// A model with no recorded origin identity has no group to collapse into, so
+// it must always survive -- hiding it would invent a relationship.
+func TestGroupingKeepsModelsWithNoOriginIdentity(t *testing.T) {
+	s := searchStore(t)
+	seedSearch(t, s, seedSpec{sha: "lonely", path: "/models/l.safetensors", name: "L"})
+	seedVersion(t, s, "v1", "SD 1.5", "42", "100")
+	seedVersion(t, s, "v2", "SD 1.5", "42", "200")
+
+	got := groupedSHAs(t, s, SearchQuery{Group: "model"})
+	if len(got) != 2 {
+		t.Fatalf("got %v, want the collapsed pair plus the unidentified model", got)
+	}
+}
+
+// Total, the page and every facet must agree about what a row is.
+func TestGroupingKeepsFacetsAndTotalConsistent(t *testing.T) {
+	s := searchStore(t)
+	seedVersion(t, s, "v1", "SD 1.5", "42", "100")
+	seedVersion(t, s, "v2", "SD 1.5", "42", "200")
+	seedVersion(t, s, "v3", "SD 1.5", "99", "300")
+
+	for _, mode := range []string{"", "architecture", "model"} {
+		q := SearchQuery{Group: mode}
+		res, err := s.Search(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		facets, err := s.FacetCounts(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Total != facets.Total {
+			t.Errorf("mode %q: Search.Total=%d but Facets.Total=%d", mode, res.Total, facets.Total)
+		}
+		if len(res.Hits) != res.Total {
+			t.Errorf("mode %q: %d hits but Total=%d", mode, len(res.Hits), res.Total)
+		}
+		// The type facet counts rows, so it has to see the collapse too.
+		if got := facets.Types["lora"]; got != res.Total {
+			t.Errorf("mode %q: type facet says %d, results say %d", mode, got, res.Total)
+		}
+	}
+}
+
+func TestGroupSizeCountsTheCollapsedVersions(t *testing.T) {
+	s := searchStore(t)
+	seedVersion(t, s, "v1", "SD 1.5", "42", "100")
+	seedVersion(t, s, "v2", "SD 1.5", "42", "200")
+	seedVersion(t, s, "v3", "SD 1.5", "42", "300")
+
+	res, err := s.Search(SearchQuery{Group: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Hits) != 1 {
+		t.Fatalf("got %d hits, want 1", len(res.Hits))
+	}
+	if res.Hits[0].GroupSize != 3 {
+		t.Errorf("group size = %d, want 3", res.Hits[0].GroupSize)
+	}
+
+	// With grouping off a row stands only for itself.
+	off, err := s.Search(SearchQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.Hits[0].GroupSize != 1 {
+		t.Errorf("group size with grouping off = %d, want 1", off.Hits[0].GroupSize)
+	}
+}
