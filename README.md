@@ -68,6 +68,19 @@ make ui             # rebuild the web UI (needs Node; the built output is commit
 make release        # cross-compiled matrix -> bin/mm-<os>-<arch>
 ```
 
+On Windows, `build.bat` does the same thing without `make`:
+
+```
+build.bat           # -> mm-windows-amd64.exe
+build.bat ui        # rebuild the web UI first (needs Node)
+```
+
+It finds Go even when the installer added it to the PATH after your terminal was
+opened, stamps the version from `git describe` the way the release workflow
+does, and names the output exactly like the published asset so `start.bat` picks
+it up with no renaming. A locally built binary carries no mark-of-the-web, so it
+needs no **Unblock**.
+
 Binaries are published as release assets rather than committed. Pushing a tag
 (`git tag v0.1.0 && git push origin v0.1.0`) builds all five targets and attaches
 them, with checksums, via `.github/workflows/release.yml`.
