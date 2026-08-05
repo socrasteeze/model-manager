@@ -407,7 +407,8 @@ export function SettingsPanel({ hidden, onLibraryChanged, onPreferenceChanged }:
                   root={r}
                   defaults={defaults}
                   map={folderMap[r.path] ?? {}}
-                  disabled={readOnly || busy}
+                  readOnly={readOnly}
+                  busy={busy}
                   onChange={(byType) => saveFolderMap({ ...folderMap, [r.path]: byType })}
                   onReset={() => {
                     const next = { ...folderMap }
@@ -836,15 +837,74 @@ export function SettingsPanel({ hidden, onLibraryChanged, onPreferenceChanged }:
   )
 }
 
-function FolderEditor({ root, defaults, map, disabled, onChange, onReset }: {
+// Folder maps are compared by value, treating a missing key and an empty
+// string as the same thing -- which is what they mean here: blank is "the
+// directory itself", the same as never having set one.
+function sameFolders(a: Record<string, string>, b: Record<string, string>) {
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if ((a[k] ?? '') !== (b[k] ?? '')) return false
+  }
+  return true
+}
+
+function FolderEditor({ root, defaults, map, readOnly, busy, onChange, onReset }: {
   root: Root
   defaults: FolderDefaults
   map: Record<string, string>
-  disabled: boolean
+  readOnly: boolean
+  // Gates the reset button only. The text fields deliberately stay enabled
+  // while a save is in flight -- see the note on `draft` below, and note that
+  // every other text setting on this panel is gated on readOnly alone.
+  busy: boolean
   onChange: (byType: Record<string, string>) => void
   onReset: () => void
 }) {
   const builtIn = defaults.defaults[root.tool ?? ''] ?? {}
+
+  // The typed value is held here and persisted on blur, like every other text
+  // setting on this panel.
+  //
+  // Saving on each keystroke instead made the field impossible to type in. The
+  // write goes through run(), which sets busy for the duration of the request;
+  // busy feeds this component's `disabled`; and a browser blurs an element the
+  // moment it becomes disabled. So every character disabled the input, threw
+  // the caret out, and re-enabled it -- one letter per click into the field.
+  // It also meant one PUT per character.
+  const [draft, setDraft] = useState<Record<string, string>>(map)
+
+  // What we last handed to onChange, so the save coming back can be told apart
+  // from a change made somewhere else.
+  const sent = useRef<Record<string, string> | null>(null)
+
+  // Re-sync when the stored map changes from outside: the reset button, or
+  // settings arriving after the first paint.
+  //
+  // Keyed on the serialized value rather than the object, because the parent
+  // passes a fresh `{}` on every render for a root with no overrides --
+  // depending on identity would reset the draft continuously and wipe what was
+  // being typed.
+  //
+  // The `sent` check is what stops this eating a keystroke. Committing one
+  // field re-renders the parent with the value we just sent, which lands here
+  // as a changed map; without the check it overwrites the draft, and any
+  // character typed into the next field in those few milliseconds is lost. A
+  // value comparison rather than a string one, because a map that has been
+  // round-tripped through the server comes back with its keys reordered.
+  const committed = JSON.stringify(map)
+  useEffect(() => {
+    if (sent.current && sameFolders(sent.current, map)) return
+    setDraft(map)
+    // map is fully described by `committed`; depending on it as well would
+    // re-run this on every parent render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [committed])
+
+  const commit = (t: string) => {
+    if ((draft[t] ?? '') === (map[t] ?? '')) return
+    sent.current = draft
+    onChange(draft)
+  }
+
   return (
     <div className="folder-editor">
       <p className="hint">
@@ -857,16 +917,20 @@ function FolderEditor({ root, defaults, map, disabled, onChange, onReset }: {
             <span>{t}</span>
             <input
               type="text"
-              value={map[t] ?? ''}
+              value={draft[t] ?? ''}
               placeholder={builtIn[t] || '(directory itself)'}
-              disabled={disabled}
+              disabled={readOnly}
               spellCheck={false}
-              onChange={(e) => onChange({ ...map, [t]: e.target.value })}
+              onChange={(e) => setDraft({ ...draft, [t]: e.target.value })}
+              onBlur={() => commit(t)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur()
+              }}
             />
           </label>
         ))}
       </div>
-      <button disabled={disabled} onClick={onReset}>
+      <button disabled={readOnly || busy} onClick={onReset}>
         Reset to the {TOOL_LABELS[root.tool ?? ''] ?? 'built-in'} defaults
       </button>
     </div>
