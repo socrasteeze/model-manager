@@ -34,7 +34,21 @@ const PROVIDERS = [
 // server did not recognise became a folder named after it.
 const TYPES = MODEL_TYPES
 
-export function BrowsePanel({ hidden }: { hidden?: boolean }) {
+interface Props {
+  hidden?: boolean
+
+  /**
+   * Whether adult results are included, from the stored preference.
+   *
+   * A prop rather than local state because it is a standing preference, not a
+   * per-search filter -- it only ever felt like a filter because it defaulted
+   * off and did not survive a reload, so the checkbox that used to live in the
+   * filter row is gone and Settings owns it.
+   */
+  includeNSFW: boolean
+}
+
+export function BrowsePanel({ hidden, includeNSFW }: Props) {
   const [query, setQuery] = useState<BrowseQuery>(emptyBrowseQuery)
   const [draft, setDraft] = useState('')
   const [results, setResults] = useState<BrowseResults | null>(null)
@@ -82,17 +96,31 @@ export function BrowsePanel({ hidden }: { hidden?: boolean }) {
       .finally(() => setLoading(false))
   }, [])
 
+  // The preference is the only source of truth for adult results. This was a
+  // checkbox in the filter row, which meant a choice that lasted until reload
+  // and then silently disagreed with the one in Settings.
+  useEffect(() => {
+    setQuery((q) => (q.nsfw === includeNSFW ? q : { ...q, nsfw: includeNSFW, page: 1 }))
+  }, [includeNSFW])
+
   useEffect(() => {
     // An untouched query is not a search: auto-firing an empty three-provider
     // sweep on mount costs real requests against rate-limited public APIs for
     // a tab the user may only be glancing at. Anything beyond the defaults --
     // text, a filter, a page, a sort change -- runs normally.
+    //
+    // nsfw is deliberately not part of this test. It used to be, back when it
+    // was a checkbox in the filter row and ticking it was a search action. It
+    // is a standing preference now, so it says nothing about whether the user
+    // has asked for anything -- and testing it either way is a bug: against
+    // false it reads as touched the moment the preference is on, and against
+    // the preference it reads as touched for the one render before the two
+    // agree. Both fire the empty sweep this guard exists to prevent.
     if (
       query.q === '' &&
       query.providers.length === 0 &&
       query.type.length === 0 &&
       query.base_model.length === 0 &&
-      !query.nsfw &&
       query.page === 1 &&
       query.sort === emptyBrowseQuery.sort
     ) {
@@ -167,14 +195,11 @@ export function BrowsePanel({ hidden }: { hidden?: boolean }) {
             <option value="rating">Highest rated</option>
             <option value="relevance">Relevance</option>
           </select>
-          <label className="check inline">
-            <input
-              type="checkbox"
-              checked={query.nsfw}
-              onChange={(e) => setQuery((q) => ({ ...q, nsfw: e.target.checked, page: 1 }))}
-            />
-            <span>Include adult content</span>
-          </label>
+          {/* Shown only when results are being withheld. The default is on, so
+              saying so in that case would be noise in the most-used row. */}
+          {!includeNSFW && (
+            <span className="source-note">Adult results are hidden — change this in Settings.</span>
+          )}
           <button
             className="link"
             disabled={checking}
@@ -313,14 +338,19 @@ function ListingCard({
 
   return (
     <article className={`listing ${status}`}>
-      {listing.thumbnail_url && (
-        <img
-          className="listing-thumb"
-          src={remoteImageURL(listing.thumbnail_url)}
-          alt=""
-          loading="lazy"
-        />
-      )}
+      {/* The frame is always rendered. A listing with no preview used to
+          render no element at all, so the card collapsed to a text block and
+          the row went ragged; the library has shown type initials in this case
+          since the start, and browse now matches it. */}
+      <div className="listing-thumb">
+        {listing.thumbnail_url ? (
+          <img src={remoteImageURL(listing.thumbnail_url)} alt="" loading="lazy" />
+        ) : (
+          <div className="placeholder" aria-hidden="true">
+            {(listing.type || '?').slice(0, 2).toUpperCase()}
+          </div>
+        )}
+      </div>
 
       <div className="listing-body">
         <div className="listing-head">
@@ -335,6 +365,9 @@ function ListingCard({
           {listing.base_model && <span>{listing.base_model}</span>}
           {file?.size_bytes ? <span>{formatBytes(file.size_bytes)}</span> : null}
           {listing.nsfw && <span className="nsfw-badge">nsfw</span>}
+          {/* Describes the file, not an action. It sat in the button row,
+              where it was the one thing that could still wrap it. */}
+          {file?.requires_auth && <span>needs an API key</span>}
         </div>
 
         {listing.trigger_words && listing.trigger_words.length > 0 && (
@@ -356,8 +389,12 @@ function ListingCard({
 
         {job && <JobProgress job={job} />}
         {err && <div className="error inline">{err}</div>}
+      </div>
 
-        <div className="listing-actions">
+      {/* A sibling of the body, not a child: grid areas only apply to direct
+          children, and this row needs the card's full width to fit its three
+          buttons on one line. */}
+      <div className="listing-actions">
           {file?.download_url && status !== 'have' && canDownload && !job && (
             <button className="primary" disabled={busy} onClick={start}>
               {busy ? 'Starting…' : 'Download'}
@@ -401,8 +438,6 @@ function ListingCard({
               Open page
             </a>
           )}
-          {file?.requires_auth && <span className="source-note">needs an API key</span>}
-        </div>
       </div>
     </article>
   )

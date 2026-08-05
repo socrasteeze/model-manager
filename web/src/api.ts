@@ -661,6 +661,50 @@ export const SETTING_COMFY_URL = 'thumbnails.comfy_url'
 export const SETTING_COMFY_WORKFLOW = 'thumbnails.comfy_workflow'
 export const SETTING_COMFY_CHECKPOINT = 'thumbnails.comfy_checkpoint'
 export const SETTING_COMFY_WORKFLOW_DIR = 'thumbnails.comfy_workflow_dir'
+export const SETTING_THUMB_ASPECT = 'thumbnails.aspect'
+export const SETTING_BROWSE_NSFW = 'browse.include_nsfw'
+export const SETTING_GROUPING = 'grouping.versions'
+
+// The thumbnail shapes on offer.
+//
+// Kept as a list rather than free text, mirroring MODEL_TYPES above: the same
+// set drives the Settings dropdown and validates what comes back from the
+// server, so a stored value this build does not recognise falls back instead
+// of being written straight into a CSS property.
+export const THUMB_ASPECTS = [
+  { value: '3/4', label: 'Portrait (3:4)' },
+  { value: '2/3', label: 'Tall (2:3) — no crop on a 512×768 preview' },
+  { value: '1', label: 'Square (1:1)' },
+] as const
+
+export type ThumbAspect = (typeof THUMB_ASPECTS)[number]['value']
+export const DEFAULT_THUMB_ASPECT: ThumbAspect = '3/4'
+
+/** Falls back to the default rather than trusting a stored value blindly. */
+export function asThumbAspect(value: unknown): ThumbAspect {
+  return THUMB_ASPECTS.some((a) => a.value === value)
+    ? (value as ThumbAspect)
+    : DEFAULT_THUMB_ASPECT
+}
+
+// Adult results are on by default; see store.SettingBrowseIncludeNSFW for why.
+export const DEFAULT_INCLUDE_NSFW = true
+
+// How versions of one upstream model collapse into a single card.
+export const GROUPING_MODES = [
+  { value: 'architecture', label: 'Same model and base model' },
+  { value: 'model', label: 'Same model, any base model' },
+  { value: 'off', label: 'Do not group' },
+] as const
+
+export type GroupingMode = (typeof GROUPING_MODES)[number]['value']
+export const DEFAULT_GROUPING: GroupingMode = 'architecture'
+
+export function asGroupingMode(value: unknown): GroupingMode {
+  return GROUPING_MODES.some((m) => m.value === value)
+    ? (value as GroupingMode)
+    : DEFAULT_GROUPING
+}
 
 // A (root path -> type -> subfolder) map. One type has three different folder
 // names across the three tools, so the mapping can only be per (root, type).

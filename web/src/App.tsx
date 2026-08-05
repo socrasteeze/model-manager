@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
+  DEFAULT_INCLUDE_NSFW,
+  DEFAULT_THUMB_ASPECT,
   MODEL_TYPES,
+  SETTING_BROWSE_NSFW,
   SETTING_FILTERS,
+  SETTING_THUMB_ASPECT,
+  asThumbAspect,
   config,
   deleteSetting,
   emptyFilters,
@@ -12,6 +17,7 @@ import {
   type Facets,
   type Filters,
   type SearchHit,
+  type ThumbAspect,
 } from './api'
 import { BrowsePanel } from './components/BrowsePanel'
 import { EnrichRunner } from './components/EnrichRunner'
@@ -44,16 +50,36 @@ export function App() {
   // one should be the view on the other. Loaded once; until it lands, the
   // default filters are used rather than blocking the first search.
   const [filtersLoaded, setFiltersLoaded] = useState(false)
+
+  // The two preferences the shell owns rather than the Settings tab: the
+  // thumbnail ratio drives a CSS variable on this element, and adult results
+  // are passed down to Browse. Both are read in the same request as the saved
+  // filters -- one round trip, not three.
+  const [thumbAspect, setThumbAspect] = useState<ThumbAspect>(DEFAULT_THUMB_ASPECT)
+  const [includeNSFW, setIncludeNSFW] = useState(DEFAULT_INCLUDE_NSFW)
+
   useEffect(() => {
     getSettings()
       .then((s) => {
         const saved = s[SETTING_FILTERS] as Partial<Filters> | undefined
         if (saved) setFilters((f) => ({ ...f, ...saved, q: f.q }))
+        setThumbAspect(asThumbAspect(s[SETTING_THUMB_ASPECT]))
+        // Absent means the default, which is on. Only an explicit false is off.
+        setIncludeNSFW(s[SETTING_BROWSE_NSFW] === undefined ? DEFAULT_INCLUDE_NSFW : !!s[SETTING_BROWSE_NSFW])
       })
       .catch(() => {
         /* a preference that will not load is not a reason to show nothing */
       })
       .finally(() => setFiltersLoaded(true))
+  }, [])
+
+  // Applied by the Settings tab writing the value, then telling us, rather than
+  // us re-reading every setting: that response also carries library.filters,
+  // and re-applying it would clobber in-session filter state against this
+  // component's own debounced write below.
+  const onPreferenceChanged = useCallback((key: string, value: unknown) => {
+    if (key === SETTING_THUMB_ASPECT) setThumbAspect(asThumbAspect(value))
+    if (key === SETTING_BROWSE_NSFW) setIncludeNSFW(!!value)
   }, [])
 
   // Persist after the load has settled, so the initial default state cannot
@@ -129,7 +155,10 @@ export function App() {
   const hasMore = hits.length < total
 
   return (
-    <div className="app">
+    // One variable on the shell rather than a class per ratio: both grids read
+    // it, and the fallback inside var() means a settings request that never
+    // lands still gets portrait rather than an unstyled tile.
+    <div className="app" style={{ '--thumb-aspect': thumbAspect } as CSSProperties}>
       <header className="topbar">
         <div className="brand">
           <svg viewBox="0 0 64 64" aria-hidden="true" className="brand-mark">
@@ -238,7 +267,7 @@ export function App() {
           replay the mount effects (and their provider requests) on every
           Library-Browse round trip, and lose results, destination choice and
           the visible download queue mid-transfer. */}
-      <BrowsePanel hidden={tab !== 'browse'} />
+      <BrowsePanel hidden={tab !== 'browse'} includeNSFW={includeNSFW} />
 
       <SettingsPanel
         hidden={tab !== 'settings'}
@@ -246,6 +275,7 @@ export function App() {
           runSearch(0, false)
           loadFacets()
         }}
+        onPreferenceChanged={onPreferenceChanged}
       />
 
       <div className="body" hidden={tab !== 'library'}>

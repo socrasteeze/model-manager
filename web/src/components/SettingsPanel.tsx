@@ -20,8 +20,20 @@ import {
   SETTING_COMFY_URL,
   SETTING_COMFY_WORKFLOW,
   SETTING_COMFY_WORKFLOW_DIR,
+  SETTING_BROWSE_NSFW,
   SETTING_DEFAULT_ROOT,
   SETTING_FOLDER_MAP,
+  SETTING_GROUPING,
+  SETTING_THUMB_ASPECT,
+  THUMB_ASPECTS,
+  GROUPING_MODES,
+  DEFAULT_GROUPING,
+  DEFAULT_INCLUDE_NSFW,
+  DEFAULT_THUMB_ASPECT,
+  asGroupingMode,
+  asThumbAspect,
+  type GroupingMode,
+  type ThumbAspect,
   adoptWorkflow,
   comfyStatus,
   listWorkflows,
@@ -35,6 +47,7 @@ import {
   type ScanJob,
 } from '../api'
 import { EnrichRunner } from './EnrichRunner'
+import { ToggleRow } from './ToggleRow'
 
 /**
  * Reads a setting that may be either a bare value ("use this for everything")
@@ -88,15 +101,26 @@ const TOOL_LABELS: Record<string, string> = {
  * per-root present-sweep ambiguous, and files under it would flap between
  * present and absent on every scan.
  */
-export function SettingsPanel({ hidden, onLibraryChanged }: {
+export function SettingsPanel({ hidden, onLibraryChanged, onPreferenceChanged }: {
   hidden: boolean
   onLibraryChanged: () => void
+
+  /**
+   * Announces a preference this panel just wrote, so the shell can apply it
+   * without re-reading every setting. Re-reading would also return
+   * library.filters, and re-applying that would clobber in-session filter
+   * state against App's own debounced write.
+   */
+  onPreferenceChanged?: (key: string, value: unknown) => void
 }) {
   const [roots, setRoots] = useState<Root[]>([])
   const [scan, setScan] = useState<ScanJob | null>(null)
   const [defaults, setDefaults] = useState<FolderDefaults | null>(null)
   const [folderMap, setFolderMap] = useState<FolderMap>({})
   const [defaultRoot, setDefaultRoot] = useState('')
+  const [thumbAspect, setThumbAspect] = useState<ThumbAspect>(DEFAULT_THUMB_ASPECT)
+  const [includeNSFW, setIncludeNSFW] = useState(DEFAULT_INCLUDE_NSFW)
+  const [grouping, setGrouping] = useState<GroupingMode>(DEFAULT_GROUPING)
   const [comfyOut, setComfyOut] = useState('')
   const [comfyUrl, setComfyUrl] = useState('')
   const [checkpoints, setCheckpoints] = useState<Record<string, string>>({})
@@ -135,6 +159,12 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
         // with, and written back the same way.
         setCheckpoints(asFamilyMap(s[SETTING_COMFY_CHECKPOINT]))
         setWorkflows(asFamilyMap(s[SETTING_COMFY_WORKFLOW]))
+        setThumbAspect(asThumbAspect(s[SETTING_THUMB_ASPECT]))
+        setGrouping(asGroupingMode(s[SETTING_GROUPING]))
+        // Absent means the default, which is on. Only an explicit false is off.
+        setIncludeNSFW(
+          s[SETTING_BROWSE_NSFW] === undefined ? DEFAULT_INCLUDE_NSFW : !!s[SETTING_BROWSE_NSFW],
+        )
       })
       .catch(() => {})
     comfyStatus().then(setComfy).catch(() => setComfy(null))
@@ -198,6 +228,18 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
       setBusy(false)
     }
   }
+
+  // Writes a preference and tells the shell, so a change here takes effect
+  // immediately rather than on the next reload. The value is always written
+  // explicitly, never deleted-to-restore-the-default the way the text settings
+  // are: for a boolean defaulting to on, "never touched" and "deliberately
+  // switched back on" would otherwise be the same stored state, and changing
+  // the default later would silently reverse a real choice.
+  const savePreference = (key: string, value: unknown) =>
+    run(async () => {
+      await putSetting(key, value)
+      onPreferenceChanged?.(key, value)
+    })
 
   const onAdd = (path: string) =>
     run(async () => {
@@ -454,7 +496,70 @@ export function SettingsPanel({ hidden, onLibraryChanged }: {
       </section>
 
       <section className="settings-block">
+        <h2>Browsing</h2>
+        <ToggleRow
+          label="Include adult results"
+          checked={includeNSFW}
+          disabled={readOnly}
+          onChange={(next) => {
+            setIncludeNSFW(next)
+            void savePreference(SETTING_BROWSE_NSFW, next)
+          }}
+          hint="On by default. The providers this searches are largely adult-adjacent, so turning it off hides most of what a search matched."
+        />
+
+        <label className="setting-row">
+          <span>Group versions</span>
+          <select
+            value={grouping}
+            disabled={readOnly}
+            onChange={(e) => {
+              const next = asGroupingMode(e.target.value)
+              setGrouping(next)
+              void savePreference(SETTING_GROUPING, next)
+            }}
+          >
+            {GROUPING_MODES.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="hint">
+          One Civitai model is published as many versions, and each one is its own
+          search result — so a search can return eight cards with the same name.
+          Grouping collapses them into one card with a version picker, in both Browse
+          and the library. The default keeps different base models apart, since a LoRA
+          rebuilt from SD 1.5 onto SDXL is not a drop-in replacement for it.
+        </p>
+      </section>
+
+      <section className="settings-block">
         <h2>Thumbnails</h2>
+        <label className="setting-row">
+          <span>Shape</span>
+          <select
+            value={thumbAspect}
+            disabled={readOnly}
+            onChange={(e) => {
+              const next = asThumbAspect(e.target.value)
+              setThumbAspect(next)
+              void savePreference(SETTING_THUMB_ASPECT, next)
+            }}
+          >
+            {THUMB_ASPECTS.map((a) => (
+              <option key={a.value} value={a.value}>
+                {a.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="hint">
+          Preview images are nearly always portrait — a Civitai preview is usually
+          512×768 — so a square tile crops the top and bottom off most of them.
+        </p>
+
         <label className="setting-row">
           <span>ComfyUI output folder</span>
           <input

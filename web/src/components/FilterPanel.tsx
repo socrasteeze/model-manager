@@ -24,15 +24,6 @@ export function FilterPanel({ facets, filters, onChange }: Props) {
 
   return (
     <div className="filters">
-      {active ? (
-        <button
-          className="clear"
-          onClick={() => onChange({ ...filters, type: [], base_model: [], tag: [], present: undefined, needs_attention: undefined })}
-        >
-          Clear filters
-        </button>
-      ) : null}
-
       <Section title="Type" counts={facets?.types} selected={filters.type} onToggle={(v) => toggle('type', v)} />
       <Section
         title="Base model"
@@ -63,6 +54,21 @@ export function FilterPanel({ facets, filters, onChange }: Props) {
           <span>Needs attention</span>
         </label>
       </div>
+
+      {/* Last, not first. Appearing above the facet lists pushed Type, Base
+          model and Tags down every time a filter went on, which is a jump in
+          the thing you are currently reading. At the end it only grows the
+          sidebar's scroll extent. Reserving the space instead would waste it
+          permanently, and rendering it always-but-disabled leaves a control
+          whose only state is "no". */}
+      {active ? (
+        <button
+          className="clear"
+          onClick={() => onChange({ ...filters, type: [], base_model: [], tag: [], present: undefined, needs_attention: undefined })}
+        >
+          Clear filters
+        </button>
+      ) : null}
     </div>
   )
 }

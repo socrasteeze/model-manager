@@ -57,6 +57,29 @@ const (
 	// A lora cannot render anything by itself and this app cannot guess which
 	// checkpoint you have, so it is configured rather than inferred.
 	SettingComfyCheckpoint = "thumbnails.comfy_checkpoint"
+
+	// SettingThumbAspect is the aspect ratio of a grid thumbnail, as a CSS
+	// ratio ("3/4"). Stored rather than fixed because preview images are
+	// portrait but not all the same portrait: a Civitai preview is usually
+	// 512x768, which a square tile cropped the top and bottom off.
+	SettingThumbAspect = "thumbnails.aspect"
+
+	// SettingBrowseIncludeNSFW permits adult results in Browse. Default is on:
+	// the providers this searches are overwhelmingly adult-adjacent, and a
+	// default of off silently hides most of what a search matched with no
+	// indication that anything was removed.
+	SettingBrowseIncludeNSFW = "browse.include_nsfw"
+
+	// SettingVersionGrouping controls how versions of one upstream model are
+	// collapsed into a single card, in both Browse and the library.
+	//
+	// One of "architecture" (the default: same origin model AND same base
+	// model), "model" (same origin model, any base model), or "off".
+	//
+	// A tri-state string rather than the two booleans it reads like
+	// ("grouped?" plus "widen?"): those make an illegal state representable --
+	// widen with grouping off -- and there is no meaning to give it.
+	SettingVersionGrouping = "grouping.versions"
 )
 
 // ErrNoSetting means the key has never been written.

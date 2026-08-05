@@ -25,7 +25,10 @@ func settingKeyAllowed(key string) bool {
 		store.SettingComfyURL,
 		store.SettingComfyWorkflow,
 		store.SettingComfyWorkflowDir,
-		store.SettingComfyCheckpoint:
+		store.SettingComfyCheckpoint,
+		store.SettingThumbAspect,
+		store.SettingBrowseIncludeNSFW,
+		store.SettingVersionGrouping:
 		return true
 	}
 	return false

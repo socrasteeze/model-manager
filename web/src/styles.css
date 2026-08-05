@@ -131,11 +131,14 @@ input:focus, select:focus, textarea:focus {
   background: var(--bg-raised);
 }
 
+/* The three tabs' scroll containers -- .results, .browse and .settings -- all
+   start their content at the same place, so switching tabs does not shift
+   where you are reading. They used to be 12/16, 1rem/1.25rem and 1.4rem/1rem. */
 .results {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
-  padding: 12px 16px 40px;
+  padding: 1rem 1.25rem 3rem;
 }
 
 .results-header {
@@ -170,7 +173,8 @@ input:focus, select:focus, textarea:focus {
 .check-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .count { color: var(--text-dim); font-size: 12px; flex-shrink: 0; }
 .more-note, .source-note { color: var(--text-dim); font-size: 12px; margin: 4px 0 0; }
-.clear { width: 100%; margin-bottom: 14px; }
+/* Sits at the end of the sidebar; see FilterPanel for why it moved. */
+.clear { width: 100%; margin-top: 4px; }
 
 /* --- grid ---------------------------------------------------------------- */
 
@@ -194,7 +198,11 @@ input:focus, select:focus, textarea:focus {
 
 .card-image {
   position: relative;
-  aspect-ratio: 1;
+  /* Portrait by default. Preview images from every provider are
+     overwhelmingly portrait -- a Civitai preview is usually 512x768 -- and a
+     square tile cropped the top and bottom off most of the library. The
+     fallback covers a settings request that never landed. */
+  aspect-ratio: var(--thumb-aspect, 3 / 4);
   background: var(--bg-sunken);
   overflow: hidden;
 }
@@ -211,18 +219,24 @@ input:focus, select:focus, textarea:focus {
   letter-spacing: 0.05em;
 }
 
+/* Inline by default, overlaid only where a card actually wants it.
+   This used to be the other way round -- absolute here, with every inline user
+   overriding it back to static -- and the overrides kept missing sites: the
+   preview strip's "yours" badge floated over the image instead of sitting in
+   its caption, and browse's nsfw tag picked up the overlay's purple block. */
 .badge {
-  position: absolute;
-  top: 6px;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   padding: 2px 6px;
   border-radius: 4px;
 }
-.absent-badge { left: 6px; background: var(--danger); color: #fff; }
-.nsfw-badge { right: 6px; background: #7b2d5e; color: #fff; }
-.warn-badge { background: var(--warn); color: #241a00; position: static; }
+.card-image .badge { position: absolute; top: 6px; }
+.card-image .absent-badge { left: 6px; }
+.card-image .nsfw-badge { right: 6px; background: #7b2d5e; color: #fff; }
+
+.absent-badge { background: var(--danger); color: #fff; }
+.warn-badge { background: var(--warn); color: #241a00; }
 
 .card-body { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
 .card-title {
@@ -291,13 +305,6 @@ input:focus, select:focus, textarea:focus {
   padding: 0;
   font-size: 18px;
   line-height: 1;
-}
-
-.detail-previews { display: flex; gap: 8px; overflow-x: auto; margin-bottom: 14px; }
-.detail-previews img {
-  height: 160px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
 }
 
 .row { display: flex; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--border); }
@@ -533,26 +540,49 @@ input:focus, select:focus, textarea:focus {
   align-items: center;
 }
 
-/* Scoped under .chip-row: the library grid has its own .chip (a static type
-   label), and an unscoped rule here would win by source order and restyle it
-   with a pointer cursor it does not deserve. */
-.chip-row .chip {
+/* The interactive chip, in one place.
+ *
+ * Every scope is listed rather than styling .chip bare: the library grid has
+ * its own .chip -- a static type label in ModelCard, not a control -- and an
+ * unscoped rule here would win by source order and give it a pointer cursor
+ * it does not deserve. That label is a genuinely different thing and stays
+ * separate.
+ *
+ * These four were four copies that had drifted: padding ranged .2-.25rem by
+ * .65-.75rem, font-size .8-.85rem, borders transparent or not, and only two of
+ * them filled in on selection -- which is why the browse filter chips and the
+ * library type chips visibly behaved like different controls. */
+.chip-row .chip,
+.type-chips .chip,
+.root-suggestions .chip,
+.family-tabs .chip {
   background: var(--bg-sunken);
   border: 1px solid transparent;
   color: var(--text-dim);
   border-radius: 999px;
   padding: 0.25rem 0.7rem;
   cursor: pointer;
+  font: inherit;
   font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
-.chip-row .chip.on {
+.chip-row .chip:hover,
+.type-chips .chip:hover,
+.root-suggestions .chip:hover,
+.family-tabs .chip:hover {
   color: var(--text);
   border-color: var(--accent);
 }
 
-.check.inline {
-  margin: 0;
+.chip-row .chip.on,
+.type-chips .chip.on,
+.family-tabs .chip.on {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-dim);
 }
 
 .listing-grid {
@@ -561,9 +591,22 @@ input:focus, select:focus, textarea:focus {
   gap: 0.9rem;
 }
 
+/* A grid, not a flex row, so the action buttons get the card's whole width
+   instead of the ~190px left beside the thumbnail. Download, Copy command and
+   Open page need roughly 280px together and the column minimum is 320px, so in
+   a flex row the third one always wrapped to a second line.
+
+   Shortening the labels would have bought the space, but "Copy" beside a
+   download button reads as "copy the file", and widening the grid to 440px
+   costs a whole column at 1280px for a card that does not need it. */
 .listing {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    'thumb body'
+    'actions actions';
   gap: 0.75rem;
+  align-items: start;
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -580,17 +623,29 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--accent);
 }
 
+/* A ratio box like the library's .card-image, rather than a bare fixed-size
+   <img>: it reserves the space before the image arrives, and it gives a
+   listing with no preview somewhere to put the type initials instead of
+   collapsing the card to a text block. */
 .listing-thumb {
-  width: 84px;
-  height: 84px;
-  object-fit: cover;
+  grid-area: thumb;
+  width: 96px;
+  aspect-ratio: var(--thumb-aspect, 3 / 4);
+  background: var(--bg-sunken);
   border-radius: 6px;
-  flex: none;
+  overflow: hidden;
 }
+.listing-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.listing-thumb .placeholder { font-size: 18px; }
 
 .listing-body {
+  grid-area: body;
   min-width: 0;
-  flex: 1;
 }
 
 .listing-head {
@@ -640,11 +695,16 @@ input:focus, select:focus, textarea:focus {
 }
 
 .listing-actions {
+  grid-area: actions;
   display: flex;
+  /* Kept wrapping as the phone fallback rather than letting the row overflow
+     the card. On a desktop column it no longer needs to: the row spans the
+     card's full width, which is what the grid above is for. */
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
-  margin-top: 0.5rem;
+  /* The grid gap does this now. */
+  margin-top: 0;
 }
 
 .listing-actions .ghost,
@@ -702,12 +762,10 @@ a.ghost {
   border-top: 1px solid var(--border);
 }
 
-/* The library grid's .badge is absolutely positioned to overlay a card corner.
-   In a browse listing the badge sits inline in the header, and inheriting that
-   absolute position lifts it out to the page corner. */
+/* .badge is inline by default now, so these only need to opt out of flex
+   stretching in the header rows they sit in. */
 .listing .badge,
 .updates .badge {
-  position: static;
   flex: none;
 }
 
@@ -785,36 +843,26 @@ a.ghost {
    panel for it is the wrong cost. */
 .type-chips {
   display: flex;
-  flex-wrap: wrap;
+  /* One line, always. This row sits above .body, so a tenth chip wrapping it
+     to two lines moved the entire library grid down -- and the chips resize on
+     their own as facet counts change, so capping the item count would not have
+     been enough on its own. Scrolling sideways is the cost; a min-height sized
+     for two rows would waste that space on every screen wide enough not to
+     need it. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  /* No scrollbar: on Windows an auto scrollbar claims vertical space when it
+     appears, which is the same height change this rule exists to remove. */
+  scrollbar-width: none;
   gap: 0.4rem;
   padding: 0.55rem 1rem;
   border-bottom: 1px solid var(--border);
   background: var(--bg-raised);
   align-items: center;
 }
-
-.type-chips .chip {
-  background: var(--bg-sunken);
-  border: 1px solid transparent;
-  color: var(--text-dim);
-  border-radius: 999px;
-  padding: 0.25rem 0.75rem;
-  cursor: pointer;
-  font-size: 0.85rem;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.type-chips .chip:hover {
-  color: var(--text);
-}
-
-.type-chips .chip.on {
-  color: var(--text);
-  border-color: var(--accent);
-  background: var(--accent-dim);
-}
+.type-chips::-webkit-scrollbar { display: none; }
+/* Never shrink: this row scrolls rather than wrapping. */
+.type-chips .chip { flex: 0 0 auto; }
 
 /* A type with no models is dimmed rather than removed, so the row does not
    reflow as the library fills up. */
@@ -843,7 +891,7 @@ a.ghost {
 .settings {
   max-width: 980px;
   margin: 0 auto;
-  padding: 1.4rem 1rem 4rem;
+  padding: 1rem 1.25rem 3rem;
   display: flex;
   flex-direction: column;
   gap: 1.6rem;
@@ -900,21 +948,6 @@ a.ghost {
   gap: 0.4rem;
   align-items: center;
   margin-bottom: 0.8rem;
-}
-
-.root-suggestions .chip {
-  background: var(--bg-sunken);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  border-radius: 999px;
-  padding: 0.2rem 0.65rem;
-  cursor: pointer;
-  font-size: 0.8rem;
-}
-
-.root-suggestions .chip:hover {
-  color: var(--text);
-  border-color: var(--accent);
 }
 
 .root-list {
@@ -1087,6 +1120,16 @@ a.ghost {
   flex: 1;
   min-width: 14rem;
 }
+
+/* The rule above is written for text boxes, and combined with the global
+   input { width: 100% } it turns a checkbox into a 14rem-wide block. Same
+   reason .check input exists for the sidebar's facet checkboxes. */
+.setting-row input[type='checkbox'] {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+}
+.toggle-row { cursor: pointer; }
 
 /* --- thumbnails ----------------------------------------------------------- */
 
@@ -1307,35 +1350,6 @@ a.ghost {
   padding: 0;
 }
 
-.workflow-editor {
-  margin-top: 0.6rem;
-}
-
-.workflow-editor summary {
-  cursor: pointer;
-  font-size: 0.9rem;
-}
-
-.workflow-editor code {
-  background: var(--bg-sunken);
-  border-radius: 4px;
-  padding: 0 0.25rem;
-  margin-right: 0.25rem;
-}
-
-.workflow-editor textarea {
-  width: 100%;
-  background: var(--bg-sunken);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: var(--radius);
-  padding: 0.5rem 0.6rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.78rem;
-  line-height: 1.45;
-  resize: vertical;
-}
-
 /* Family slots in the ComfyUI settings. A dot marks the ones that have a
    workflow or checkpoint set, so "what have I actually configured" is one
    glance rather than a click per family. */
@@ -1344,27 +1358,6 @@ a.ghost {
   flex-wrap: wrap;
   gap: 0.35rem;
   margin: 0.5rem 0 0.8rem;
-}
-
-.family-tabs .chip {
-  background: var(--bg-sunken);
-  border: 1px solid transparent;
-  color: var(--text-dim);
-  border-radius: 999px;
-  padding: 0.22rem 0.7rem;
-  cursor: pointer;
-  font-size: 0.82rem;
-  font-family: inherit;
-}
-
-.family-tabs .chip:hover {
-  color: var(--text);
-}
-
-.family-tabs .chip.on {
-  color: var(--text);
-  border-color: var(--accent);
-  background: var(--accent-dim);
 }
 
 .family-tabs .chip.configured::after {

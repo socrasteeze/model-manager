@@ -5,6 +5,30 @@ list internal refactors with no visible effect.
 
 Every entry links to the full release notes for that version.
 
+## [Unreleased]
+
+### Added
+
+- A Settings control for the thumbnail shape. Previews are nearly always
+  portrait, so grids are now 3:4 by default instead of square, which used to
+  crop the top and bottom off most images. Tall (2:3) and square are also
+  available.
+- Adult results in Browse are now on by default and remembered. The control
+  moved from a checkbox that reset on every reload to the Settings tab.
+
+### Fixed
+
+- Turning on a filter no longer pushes the rest of the sidebar down, and the
+  type row above the library no longer changes height.
+- The three buttons on a Browse result no longer wrap onto a second line.
+- A Browse result with no preview image showed as a bare block of text. It now
+  gets a placeholder tile, like the library already did.
+- The "nsfw" tag on a Browse result was drawn as unreadable pink text on a
+  purple block, and the "yours" tag on a preview image floated over the picture
+  instead of sitting under it.
+- The library, Browse and Settings tabs started their content at three
+  different places, so switching tabs shifted what you were reading.
+
 ## [v0.3.3](docs/release-notes/v0.3.3.md) — 2026-08-04
 
 ### Fixed
