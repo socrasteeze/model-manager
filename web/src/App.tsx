@@ -347,14 +347,34 @@ export function App() {
 
           {!loading && !error && hits.length === 0 && (
             <div className="empty">
-              <p>Nothing matches.</p>
+              {/* An empty library is the first thing a new user sees, so it is a
+                  setup screen rather than a search result. "Nothing matches"
+                  answers a question they did not ask -- they have not searched
+                  for anything yet. */}
               {facets?.library_total === 0 ? (
-                <p className="hint">
-                  The index is empty. Run <code>mm scan --root /path/to/models</code>, then{' '}
-                  <code>mm interpret</code>.
-                </p>
+                <>
+                  <p>No model directories yet.</p>
+                  <p className="hint">
+                    Point Model Manager at a folder and it indexes what is
+                    already there. Nothing is moved, renamed, or modified.
+                  </p>
+                  {config.readOnly ? (
+                    <p className="hint">
+                      This daemon is read-only, so directories cannot be added
+                      from here. Restart it with <code>--writable</code>, or run{' '}
+                      <code>mm scan --root /path/to/models</code>.
+                    </p>
+                  ) : (
+                    <button className="primary" onClick={() => setTab('settings')}>
+                      Add a model directory
+                    </button>
+                  )}
+                </>
               ) : (
-                <p className="hint">Try clearing a filter or shortening the search.</p>
+                <>
+                  <p>Nothing matches.</p>
+                  <p className="hint">Try clearing a filter or shortening the search.</p>
+                </>
               )}
             </div>
           )}
