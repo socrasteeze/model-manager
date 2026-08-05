@@ -5,7 +5,7 @@ list internal refactors with no visible effect.
 
 Every entry links to the full release notes for that version.
 
-## [Unreleased]
+## [v0.3.3](docs/release-notes/v0.3.3.md) — 2026-08-04
 
 ### Fixed
 
