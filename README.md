@@ -46,10 +46,11 @@ and what that measurably costs.
 
 ## Install
 
-**Current release: [v0.3.3](../../releases/tag/v0.3.3)** — fixes every
-thumbnail in Browse showing broken (Civitai moved its image CDN host). See
-its [release notes](docs/release-notes/v0.3.3.md); nothing is mandatory to
-run after upgrading.
+**Current release: [v0.4.0](../../releases/tag/v0.4.0)** — version grouping in
+Browse and the library, a saved "needs update" mark and filter, portrait
+thumbnails, and a round of UI fixes. See its
+[release notes](docs/release-notes/v0.4.0.md); one schema migration applies
+itself and nothing needs running by hand.
 
 Download the binary for your platform from the
 [latest release](../../releases/latest) — one file, nothing to install. Windows
