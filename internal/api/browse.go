@@ -257,26 +257,29 @@ func (s *Server) handleRemoteImage(w http.ResponseWriter, r *http.Request) {
 
 const maxRemoteImageBytes = 8 << 20
 
-// imageCDNHosts are the provider image hosts, which are separate from their API
-// hosts and so are not covered by the configured bases.
-var imageCDNHosts = []string{
-	"image.civitai.com",
-	"imagecache.civitai.com",
+// providerDomains are the domains this daemon trusts as sources of provider
+// content -- image previews and model downloads alike -- matched by suffix
+// rather than as a list of exact hostnames, because every provider here
+// shards or rotates its CDN backend across subdomains the daemon has no way
+// to enumerate in advance. This used to be an exact-hostname list here
+// (image.civitai.com, cdn.civitai.com, ...) while downloadHostAllowed in
+// downloads.go already used suffix matching for the same reason -- and
+// image.civitai.com started 301-redirecting to image-b2.civitai.com, a host
+// never enumerated, so every thumbnail 502'd until this was unified with the
+// list that already got it right.
+var providerDomains = []string{
 	"civitai.com",
 	"civitai.red",
 	"civitai.green",
-	"cdn.civitai.com",
 	"civarchive.com",
-	"cdn.civarchive.com",
 	"huggingface.co",
-	"cdn-uploads.huggingface.co",
-	"cdn-lfs.huggingface.co",
+	"hf.co",
 }
 
 func (s *Server) imageHostAllowed(host string) bool {
 	h := strings.ToLower(host)
-	for _, allowed := range imageCDNHosts {
-		if h == allowed {
+	for _, domain := range providerDomains {
+		if h == domain || strings.HasSuffix(h, "."+domain) {
 			return true
 		}
 	}

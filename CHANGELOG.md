@@ -5,6 +5,16 @@ list internal refactors with no visible effect.
 
 Every entry links to the full release notes for that version.
 
+## [Unreleased]
+
+### Fixed
+
+- Every thumbnail in Browse was broken. Civitai's image host now redirects
+  to a CDN host this daemon did not recognize, so the proxy refused it. The
+  image and download allowlists now match by domain instead of by exact
+  hostname, so a provider moving its CDN again will not need a code change
+  to keep working.
+
 ## [v0.3.2](docs/release-notes/v0.3.2.md) — 2026-08-03
 
 ### Fixed

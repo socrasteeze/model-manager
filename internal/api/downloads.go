@@ -413,9 +413,11 @@ func pathsEqual(a, b string) bool {
 
 // downloadHostAllowed reports whether a download may be fetched from a host.
 //
-// Broader than the image proxy's list because model files are served from
-// dedicated CDN hosts, but still a list: an arbitrary URL is not a legal
-// download source.
+// Same trust list as the image proxy's (providerDomains, in browse.go): both
+// are "is this a host one of the configured providers actually controls",
+// and keeping that as one list rather than two is what stops them drifting
+// out of sync the way they once did -- this used to carry its own domain
+// suffix list, duplicating providerDomains almost exactly.
 //
 // Note the limit of this check. It constrains the host the request is *sent*
 // to; the transfer follows redirects, as it must for HuggingFace, whose resolve
@@ -424,27 +426,7 @@ func pathsEqual(a, b string) bool {
 // response is written to a quarantine file and verified against an expected
 // hash rather than returned to the caller, which is what keeps that acceptable.
 func (s *Server) downloadHostAllowed(host string) bool {
-	h := strings.ToLower(host)
-	if s.imageHostAllowed(h) {
-		return true
-	}
-	for _, suffix := range downloadHostSuffixes {
-		if h == suffix || strings.HasSuffix(h, "."+suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-// downloadHostSuffixes are provider download CDNs, matched as domain suffixes
-// because HuggingFace numbers its CDN hosts per region.
-var downloadHostSuffixes = []string{
-	"civitai.com",
-	"civitai.red",
-	"civitai.green",
-	"civarchive.com",
-	"huggingface.co",
-	"hf.co",
+	return s.imageHostAllowed(host)
 }
 
 // downloadWorkDir is where partial transfers live before they are verified.
