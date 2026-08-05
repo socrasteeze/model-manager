@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -16,11 +17,12 @@ import (
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/provenance"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/testutil"
 )
 
 func testStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "master.db"), store.Options{AllowNetworkPath: true})
+	s, err := store.Open(filepath.Join(testutil.TempDir(t), "master.db"), store.Options{AllowNetworkPath: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +52,7 @@ func testStore(t *testing.T) *store.Store {
 
 func newServer(t *testing.T, mutate func(*Config)) *Server {
 	t.Helper()
-	blobs, err := blobstore.New(filepath.Join(t.TempDir(), "blobs"))
+	blobs, err := blobstore.New(filepath.Join(testutil.TempDir(t), "blobs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +409,7 @@ func TestTrainingRecordRoundTrip(t *testing.T) {
 }
 
 func TestPreviewIsServedWithSniffedType(t *testing.T) {
-	blobs, err := blobstore.New(filepath.Join(t.TempDir(), "blobs"))
+	blobs, err := blobstore.New(filepath.Join(testutil.TempDir(t), "blobs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +571,7 @@ func TestNoUIStillServesAPI(t *testing.T) {
 // --- token file ----------------------------------------------------------------
 
 func TestLoadOrCreateToken(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sub", "api-token")
+	path := filepath.Join(testutil.TempDir(t), "sub", "api-token")
 
 	token, err := LoadOrCreateToken(path)
 	if err != nil {
@@ -585,7 +587,19 @@ func TestLoadOrCreateToken(t *testing.T) {
 	}
 	// The token is equivalent to read access to every model file the daemon can
 	// see, so the file must not be group- or world-readable.
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	//
+	// Windows has no POSIX permission bits. Go maps the 0600 that
+	// LoadOrCreateToken passes onto the read-only attribute and nothing else,
+	// and Mode().Perm() reports 0666 for any writable file -- so this asserts
+	// nothing there. Access is governed by the ACL the file inherits from the
+	// directory instead, which is not readable through os.FileInfo.
+	//
+	// Skipped rather than loosened: the 0600 is a real guarantee on Unix, it is
+	// what the daemon actually writes, and CI runs Linux -- so the assertion
+	// still runs on every release.
+	if runtime.GOOS == "windows" {
+		t.Log("skipping the permission-bit check: Windows uses ACLs, not POSIX modes")
+	} else if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("token file mode = %o, want 600", perm)
 	}
 

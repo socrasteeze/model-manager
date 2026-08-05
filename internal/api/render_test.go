@@ -13,6 +13,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/basemodel"
 	"github.com/socrasteeze/model-manager/internal/comfy"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/testutil"
 )
 
 // fakeComfyServer answers the three calls the client makes, returning a real
@@ -51,7 +52,7 @@ func fakeComfyServer(t *testing.T, image []byte) *httptest.Server {
 
 func renderServer(t *testing.T, comfyURL string) *Server {
 	t.Helper()
-	return serverWithRoot(t, t.TempDir(), func(c *Config) {
+	return serverWithRoot(t, testutil.TempDir(t), func(c *Config) {
 		c.ReadOnly = false
 		mgr := comfy.NewManager(nil, nil)
 		mgr.PollInterval = time.Millisecond
@@ -185,7 +186,7 @@ func TestRenderRefusedWithoutAConfiguredComfyUI(t *testing.T) {
 }
 
 func TestRenderRefusedInReadOnlyMode(t *testing.T) {
-	s := serverWithRoot(t, t.TempDir(), func(c *Config) {
+	s := serverWithRoot(t, testutil.TempDir(t), func(c *Config) {
 		c.ReadOnly = true
 		c.Renders = comfy.NewManager(nil, nil)
 	})
@@ -359,7 +360,7 @@ func mustTemplate(t *testing.T, s *Server, family string) string {
 // workflow stays where ComfyUI saved it, stays editable there, and the next
 // render picks the edit up.
 func TestAFamilySlotCanNameAWorkflowFile(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	path := filepath.Join(dir, "flux2-preview.json")
 	graph := `{"1":{"class_type":"UNETLoader","inputs":{"unet_name":"{{checkpoint}}"}}}`
 	if err := os.WriteFile(path, []byte(graph), 0o644); err != nil {
@@ -393,11 +394,11 @@ func TestAFamilySlotCanNameAWorkflowFile(t *testing.T) {
 
 // A stored relative name must not walk out of the workflow folder.
 func TestWorkflowNameCannotEscapeTheFolder(t *testing.T) {
-	outside := t.TempDir()
+	outside := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(outside, "secret.json"), []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(t.TempDir(), "workflows")
+	dir := filepath.Join(testutil.TempDir(t), "workflows")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +419,7 @@ func TestWorkflowNameCannotEscapeTheFolder(t *testing.T) {
 // discovered when a render fails at 2am. That is the cost of pointing at files
 // rather than copying them, and it is worth paying only if it is visible.
 func TestMissingWorkflowFileIsReportedInStatus(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	s := renderServer(t, "")
 	if err := s.cfg.Store.PutSetting(store.SettingComfyWorkflowDir, dir); err != nil {
 		t.Fatal(err)

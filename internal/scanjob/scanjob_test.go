@@ -9,18 +9,19 @@ import (
 
 	"github.com/socrasteeze/model-manager/internal/scan"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/testutil"
 )
 
 func testManager(t *testing.T) (*Manager, *store.Store, string) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "master.db"),
+	st, err := store.Open(filepath.Join(testutil.TempDir(t), "master.db"),
 		store.Options{AllowNetworkPath: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
 
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	// A file big enough to be worth hashing, so the scan has something to do.
 	if err := os.WriteFile(filepath.Join(root, "a.safetensors"),
 		make([]byte, 1<<20), 0o644); err != nil {

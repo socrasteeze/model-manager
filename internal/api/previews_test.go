@@ -16,6 +16,7 @@ import (
 
 	"github.com/socrasteeze/model-manager/internal/provenance"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/testutil"
 )
 
 func testPNG(w, h int) []byte {
@@ -45,7 +46,7 @@ func writableServer(t *testing.T, root string) *Server {
 }
 
 func TestUploadedPreviewIsStoredWithAThumbnail(t *testing.T) {
-	s := writableServer(t, t.TempDir())
+	s := writableServer(t, testutil.TempDir(t))
 
 	rec := uploadPreview(t, s, "aaa", testPNG(1200, 800))
 	if rec.Code != http.StatusCreated {
@@ -73,7 +74,7 @@ func TestUploadedPreviewIsStoredWithAThumbnail(t *testing.T) {
 // where an HTML file that renders is XSS. The type is sniffed, never taken from
 // a header or a filename.
 func TestUploadRejectsNonImages(t *testing.T) {
-	s := writableServer(t, t.TempDir())
+	s := writableServer(t, testutil.TempDir(t))
 
 	for _, body := range [][]byte{
 		[]byte("<html><script>alert(1)</script></html>"),
@@ -88,7 +89,7 @@ func TestUploadRejectsNonImages(t *testing.T) {
 }
 
 func TestUploadRefusedInReadOnlyMode(t *testing.T) {
-	s := serverWithRoot(t, t.TempDir(), func(c *Config) { c.ReadOnly = true })
+	s := serverWithRoot(t, testutil.TempDir(t), func(c *Config) { c.ReadOnly = true })
 	if rec := uploadPreview(t, s, "aaa", testPNG(64, 64)); rec.Code != http.StatusForbidden {
 		t.Fatalf("got %d, want 403", rec.Code)
 	}
@@ -97,7 +98,7 @@ func TestUploadRefusedInReadOnlyMode(t *testing.T) {
 // The guarantee the user asked for: a thumbnail you chose is not displaced by
 // the next enrichment run, and does not vanish when the source deletes it.
 func TestManualPreviewOutranksAndSurvivesFetchedOnes(t *testing.T) {
-	s := writableServer(t, t.TempDir())
+	s := writableServer(t, testutil.TempDir(t))
 
 	// A provider preview arrives first, at the front of the order.
 	fetched, err := s.cfg.Blobs.Put(testPNG(300, 300))
@@ -142,7 +143,7 @@ func TestManualPreviewOutranksAndSurvivesFetchedOnes(t *testing.T) {
 }
 
 func TestPreviewWorkflowIsExtractedAndServedBack(t *testing.T) {
-	s := writableServer(t, t.TempDir())
+	s := writableServer(t, testutil.TempDir(t))
 
 	base := testPNG(700, 700)
 	workflow := []byte(`{"nodes":[{"id":1,"type":"KSampler"}]}`)
@@ -174,7 +175,7 @@ func TestPreviewWorkflowIsExtractedAndServedBack(t *testing.T) {
 }
 
 func TestDeletePreviewDetachesButKeepsTheBlob(t *testing.T) {
-	s := writableServer(t, t.TempDir())
+	s := writableServer(t, testutil.TempDir(t))
 
 	rec := uploadPreview(t, s, "aaa", testPNG(700, 700))
 	var got struct {
@@ -203,16 +204,16 @@ func TestDeletePreviewDetachesButKeepsTheBlob(t *testing.T) {
 // The generated-image picker reads the local filesystem for a browser, so its
 // reach must be the one directory the user configured.
 func TestGeneratedImagePickerCannotEscapeItsFolder(t *testing.T) {
-	outside := t.TempDir()
+	outside := testutil.TempDir(t)
 	if err := os.WriteFile(filepath.Join(outside, "secret.png"), testPNG(32, 32), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	outDir := filepath.Join(t.TempDir(), "output")
+	outDir := filepath.Join(testutil.TempDir(t), "output")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	s := writableServer(t, t.TempDir())
+	s := writableServer(t, testutil.TempDir(t))
 	if err := s.cfg.Store.PutSetting(store.SettingComfyOutputDir, outDir); err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +230,7 @@ func TestGeneratedImagePickerCannotEscapeItsFolder(t *testing.T) {
 }
 
 func TestGeneratedImagesListsNewestFirst(t *testing.T) {
-	outDir := filepath.Join(t.TempDir(), "output")
+	outDir := filepath.Join(testutil.TempDir(t), "output")
 	if err := os.MkdirAll(filepath.Join(outDir, "2026-08-01"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +240,7 @@ func TestGeneratedImagesListsNewestFirst(t *testing.T) {
 		}
 	}
 
-	s := writableServer(t, t.TempDir())
+	s := writableServer(t, testutil.TempDir(t))
 	if err := s.cfg.Store.PutSetting(store.SettingComfyOutputDir, outDir); err != nil {
 		t.Fatal(err)
 	}

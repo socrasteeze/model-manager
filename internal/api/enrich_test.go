@@ -14,6 +14,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/provenance"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/testutil"
 )
 
 // A model-version response for the seeded model. Deliberately disagrees with the
@@ -67,7 +68,7 @@ func enrichServer(t *testing.T, delay time.Duration) (*Server, *store.Store) {
 	// set must not get different test results from one without it.
 	client.APIKey, client.HFToken = "", ""
 
-	blobs, err := blobstore.New(filepath.Join(t.TempDir(), "blobs"))
+	blobs, err := blobstore.New(filepath.Join(testutil.TempDir(t), "blobs"))
 	if err != nil {
 		t.Fatal(err)
 	}

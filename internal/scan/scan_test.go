@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/socrasteeze/model-manager/internal/store"
@@ -396,6 +397,18 @@ func TestSiblingRootsWithSharedPrefixAreAllowed(t *testing.T) {
 }
 
 func TestUnreadableFileIsRecordedAndScanContinues(t *testing.T) {
+	// os.Chmod on Windows sets only the read-only attribute; it cannot revoke
+	// read access, so the "unreadable" file reads back fine and the scan has no
+	// error to record. Making a file genuinely unreadable there means editing
+	// its ACL, which needs golang.org/x/sys/windows -- a dependency this module
+	// does not carry, for one test, on the platform that is not CI.
+	//
+	// The behaviour under test -- a scan records the error and keeps going
+	// rather than aborting the run -- is real and still verified on Linux,
+	// which is what the release workflow runs.
+	if runtime.GOOS == "windows" {
+		t.Skip("os.Chmod cannot revoke read access on Windows; ACLs govern it")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root; permission bits do not restrict reads")
 	}

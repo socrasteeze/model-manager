@@ -17,12 +17,13 @@ import (
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/testutil"
 )
 
 // serverWithRoot builds a server whose index knows exactly one model root.
 func serverWithRoot(t *testing.T, root string, mutate func(*Config)) *Server {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "master.db"),
+	st, err := store.Open(filepath.Join(testutil.TempDir(t), "master.db"),
 		store.Options{AllowNetworkPath: true})
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +42,7 @@ func serverWithRoot(t *testing.T, root string, mutate func(*Config)) *Server {
 		t.Fatal(err)
 	}
 
-	blobs, err := blobstore.New(filepath.Join(t.TempDir(), "blobs"))
+	blobs, err := blobstore.New(filepath.Join(testutil.TempDir(t), "blobs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,7 @@ func serverWithRoot(t *testing.T, root string, mutate func(*Config)) *Server {
 }
 
 func TestResolveDestinationAcceptsScannedRoot(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	s := serverWithRoot(t, root, nil)
 
 	got, _, err := s.resolveDestination(root, "loras/style")
@@ -67,8 +68,8 @@ func TestResolveDestinationAcceptsScannedRoot(t *testing.T) {
 }
 
 func TestResolveDestinationRejectsUnknownRoot(t *testing.T) {
-	root := t.TempDir()
-	other := t.TempDir()
+	root := testutil.TempDir(t)
+	other := testutil.TempDir(t)
 	s := serverWithRoot(t, root, nil)
 
 	// A directory that exists and is writable, but was never scanned. Existing
@@ -79,7 +80,7 @@ func TestResolveDestinationRejectsUnknownRoot(t *testing.T) {
 }
 
 func TestResolveDestinationRejectsTraversal(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	s := serverWithRoot(t, root, nil)
 
 	for _, subdir := range []string{
@@ -105,8 +106,8 @@ func TestResolveDestinationRejectsSymlinkEscape(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs privileges on Windows")
 	}
-	root := t.TempDir()
-	outside := t.TempDir()
+	root := testutil.TempDir(t)
+	outside := testutil.TempDir(t)
 	s := serverWithRoot(t, root, nil)
 
 	link := filepath.Join(root, "sneaky")
@@ -124,7 +125,7 @@ func TestResolveDestinationRejectsSymlinkEscape(t *testing.T) {
 }
 
 func TestDownloadHostAllowlist(t *testing.T) {
-	s := serverWithRoot(t, t.TempDir(), func(c *Config) {
+	s := serverWithRoot(t, testutil.TempDir(t), func(c *Config) {
 		c.Origin = nil
 	})
 
@@ -151,7 +152,7 @@ func TestDownloadHostAllowlist(t *testing.T) {
 }
 
 func TestDownloadRefusedInReadOnlyMode(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	s := serverWithRoot(t, root, func(c *Config) { c.ReadOnly = true })
 
 	body := `{"url":"https://civitai.com/api/download/models/1","dest_root":"` + root + `"}`
@@ -162,7 +163,7 @@ func TestDownloadRefusedInReadOnlyMode(t *testing.T) {
 }
 
 func TestDownloadRejectsDisallowedHostAndRoot(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	// Writable, but with no manager configured the endpoint must still refuse
 	// rather than fall through to anything.
 	s := serverWithRoot(t, root, func(c *Config) { c.ReadOnly = false })
@@ -174,7 +175,7 @@ func TestDownloadRejectsDisallowedHostAndRoot(t *testing.T) {
 }
 
 func TestDownloadRootsEndpointListsScannedRoots(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	s := serverWithRoot(t, root, nil)
 
 	w := do(s, "GET", "http://localhost/api/downloads/roots", "", nil)
@@ -212,7 +213,7 @@ func TestCleanSubdirStripsTraversal(t *testing.T) {
 // lets them through, and without it the UI is a blank page in exactly the
 // off-loopback deployment the token exists for.
 func TestAssetsAuthenticateViaCookie(t *testing.T) {
-	s := serverWithRoot(t, t.TempDir(), func(c *Config) {
+	s := serverWithRoot(t, testutil.TempDir(t), func(c *Config) {
 		c.Security = Security{RequireToken: true, Token: "sekrit"}
 		c.UI = fstest.MapFS{
 			"index.html":    {Data: []byte("<html><head></head><body></body></html>")},

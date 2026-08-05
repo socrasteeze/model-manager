@@ -11,12 +11,13 @@ import (
 
 	"github.com/socrasteeze/model-manager/internal/modeltype"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/testutil"
 )
 
 // A download of a known type lands in the folder the root's tool uses for it,
 // without the client having said anything about directories.
 func TestDestinationResolvesPerRootAndType(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.Mkdir(filepath.Join(root, "checkpoints"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +35,7 @@ func TestDestinationResolvesPerRootAndType(t *testing.T) {
 }
 
 func TestDestinationHonoursTheConfiguredMapOverTheDefault(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.Mkdir(filepath.Join(root, "checkpoints"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +55,7 @@ func TestDestinationHonoursTheConfiguredMapOverTheDefault(t *testing.T) {
 // The bug this stage exists to close. An unrecognised provider type must fall
 // back to the root, never become a directory named after itself.
 func TestUnknownTypeFallsBackToTheRootRatherThanInventingAFolder(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.Mkdir(filepath.Join(root, "checkpoints"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +79,7 @@ func TestUnknownTypeFallsBackToTheRootRatherThanInventingAFolder(t *testing.T) {
 // A configured folder is still a path segment joined onto a model root, so it
 // goes through the same traversal stripping every other subdir does.
 func TestConfiguredFolderCannotEscapeTheRoot(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	s := serverWithRoot(t, root, nil)
 
 	if err := s.cfg.Store.PutSetting(store.SettingFolderMap, map[string]map[string]string{
@@ -100,7 +101,7 @@ func TestConfiguredFolderCannotEscapeTheRoot(t *testing.T) {
 }
 
 func TestDestinationEndpointReportsTheResolvedPath(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	if err := os.Mkdir(filepath.Join(root, "StableDiffusion"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestDestinationEndpointReportsTheResolvedPath(t *testing.T) {
 // A default root that was removed or disabled must not stop downloads: fall
 // back to a live root rather than refusing until the user notices the setting.
 func TestStaleDefaultRootFallsBack(t *testing.T) {
-	root := t.TempDir()
+	root := testutil.TempDir(t)
 	s := serverWithRoot(t, root, nil)
 
 	if err := s.cfg.Store.PutSetting(store.SettingDefaultDownloadRoot,
