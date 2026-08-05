@@ -34,10 +34,6 @@ import (
 // throttled, but finite so a hung upstream cannot hold a connection forever.
 const browseTimeout = 90 * time.Second
 
-// updatesTimeout bounds an update check, which is one request per owned model
-// and legitimately slow on a large library.
-const updatesTimeout = 30 * time.Minute
-
 // browseResponse is what the UI renders.
 type browseResponse struct {
 	Items []origin.Listing `json:"items"`
@@ -102,70 +98,6 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		resp.Errors["local"] = "could not read the library index; have/update status is missing: " + err.Error()
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-type updatesResponse struct {
-	Updates []origin.Update `json:"updates"`
-	Checked int             `json:"checked"`
-	Errors  int             `json:"errors"`
-
-	// RateLimited marks a partial sweep; see origin.UpdateStats.
-	RateLimited bool `json:"rate_limited,omitempty"`
-}
-
-func (s *Server) handleUpdates(w http.ResponseWriter, r *http.Request) {
-	registry := s.registry()
-	if registry == nil {
-		writeError(w, http.StatusServiceUnavailable, "update checking is disabled",
-			"the server was started without an origin client")
-		return
-	}
-
-	// Single flight. An update check is one upstream request per owned model
-	// with a 30-minute budget; concurrent invocations would multiply that
-	// against a rate-limited public API. On the loopback default this
-	// endpoint is also reachable without a credential by anything that can
-	// make the browser fetch a URL, so the cap doubles as abuse containment:
-	// N injected <img> tags get one sweep, not N.
-	if !s.updateCheck.CompareAndSwap(false, true) {
-		writeError(w, http.StatusConflict, "an update check is already running",
-			"wait for it to finish; concurrent checks would multiply requests against the provider")
-		return
-	}
-	defer s.updateCheck.Store(false)
-
-	idx, err := origin.BuildLocalIndex(s.cfg.Store)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not index the library", err.Error())
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), updatesTimeout)
-	defer cancel()
-
-	updates, stats, err := origin.CheckUpdates(ctx, idx, origin.UpdateOptions{
-		Client: s.cfg.Origin,
-		Limit:  clampInt(atoiDefault(r.URL.Query().Get("limit"), 0), 0, 100000),
-	})
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "update check failed", err.Error())
-		return
-	}
-
-	origin.MarkBaseModelChanges(updates, func(sha string) string {
-		rec, err := s.cfg.Store.GetModelRecord(sha)
-		if err != nil || rec == nil {
-			return ""
-		}
-		return rec.BaseModel
-	})
-
-	writeJSON(w, http.StatusOK, updatesResponse{
-		Updates:     updates,
-		Checked:     stats.Checked,
-		Errors:      stats.Errors,
-		RateLimited: stats.RateLimited,
-	})
 }
 
 // handleRemoteImage proxies a provider's thumbnail.

@@ -19,6 +19,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/scan"
 	"github.com/socrasteeze/model-manager/internal/scanjob"
+	"github.com/socrasteeze/model-manager/internal/updatejob"
 	"github.com/socrasteeze/model-manager/internal/webui"
 )
 
@@ -151,6 +152,14 @@ disk should not be reachable from a shared LAN without one.`)
 		enrichment = enrichjob.New(st, blobs, func() *origin.Client { return originClient })
 	}
 
+	// Update sweeps follow the same two rules and share the same client, for
+	// the same reason: one throttle between everything that talks to the
+	// provider.
+	var updates *updatejob.Manager
+	if !*noRemote && *writable {
+		updates = updatejob.New(st, func() *origin.Client { return originClient })
+	}
+
 	// Rendering a thumbnail with ComfyUI creates a preview, so it follows the
 	// same --writable rule as every other write. Deliberately *not* gated on
 	// --no-remote: that flag stops the daemon talking to third parties, and a
@@ -170,6 +179,7 @@ disk should not be reachable from a shared LAN without one.`)
 		ReadOnly:  !*writable,
 		Origin:    originClient,
 		Enrich:    enrichment,
+		Updates:   updates,
 		Scans:     scans,
 		Renders:   renders,
 		Downloads: downloads,

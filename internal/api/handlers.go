@@ -43,6 +43,7 @@ func searchQueryFrom(r *http.Request) store.SearchQuery {
 		HasPreview:     queryBool(r, "has_preview"),
 		NSFW:           queryBool(r, "nsfw"),
 		Present:        queryBool(r, "present"),
+		NeedsUpdate:    queryBool(r, "needs_update"),
 		NeedsAttention: queryBool(r, "needs_attention") != nil && *queryBool(r, "needs_attention"),
 		Sort:           r.URL.Query().Get("sort"),
 		Desc:           r.URL.Query().Get("order") == "desc",

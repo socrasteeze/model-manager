@@ -127,6 +127,13 @@ func New(st *store.Store, blobs *blobstore.Store, client func() *origin.Client) 
 	return &Manager{st: st, blobs: blobs, client: client, runner: jobrun.New[Job](jobrun.GenID("enrich"))}
 }
 
+// InFlight reports whether a sweep is running, without registering anything.
+//
+// Used by the update endpoints, which refuse to start their own sweep while
+// this one is going: both spend the same shared origin.Client throttle, and
+// jobrun only enforces at-most-one within a Runner.
+func (m *Manager) InFlight() (Job, bool) { return m.runner.InFlight() }
+
 // Start begins a sweep. It registers the job before returning, so the caller's
 // first poll is guaranteed to see it.
 func (m *Manager) Start(scope string, opts Options) (Job, error) {

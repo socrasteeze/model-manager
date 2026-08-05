@@ -292,3 +292,114 @@ func TestBaseModelChangeIsFlagged(t *testing.T) {
 		t.Errorf("a base-model change was not flagged: %+v", ups)
 	}
 }
+
+// filterSQL exists because Search and FacetCounts once disagreed about what a
+// row was. Any new dimension has to agree across all three of its consumers.
+func TestNeedsUpdateAgreesAcrossSearchFacetsAndSHAs(t *testing.T) {
+	s := searchStore(t)
+	seedSearch(t, s, seedSpec{sha: "aaa", path: "/models/a.safetensors", name: "A", typ: "lora"})
+	seedSearch(t, s, seedSpec{sha: "bbb", path: "/models/b.safetensors", name: "B", typ: "lora"})
+	seedSearch(t, s, seedSpec{sha: "ccc", path: "/models/c.safetensors", name: "C", typ: "lora"})
+	seedOwned(t, s, "aaa", "1", "100")
+	seedOwned(t, s, "bbb", "2", "100")
+	seedUpstream(t, s, "1", "200", "") // aaa needs an update
+	seedUpstream(t, s, "2", "100", "") // bbb is current
+	// ccc has no origin identity at all.
+
+	yes := true
+	q := SearchQuery{NeedsUpdate: &yes}
+
+	res, err := s.Search(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shas, err := s.SearchSHAs(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facets, err := s.FacetCounts(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if res.Total != 1 || len(shas) != 1 || facets.NeedsUpdate != 1 {
+		t.Fatalf("disagreement: Search.Total=%d SearchSHAs=%d Facets.NeedsUpdate=%d, want 1/1/1",
+			res.Total, len(shas), facets.NeedsUpdate)
+	}
+	if res.Hits[0].SHA256 != "aaa" {
+		t.Errorf("matched %s, want aaa", res.Hits[0].SHA256)
+	}
+
+	// The inverse selects everything else, including the never-checked model:
+	// unchecked is not "needs an update".
+	no := false
+	rest, err := s.Search(SearchQuery{NeedsUpdate: &no})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rest.Total != 2 {
+		t.Errorf("needs_update=false matched %d, want the other 2", rest.Total)
+	}
+}
+
+// The card has to be able to say "v1 -> v2", not just "update".
+func TestSearchHitCarriesUpdateBadgeFields(t *testing.T) {
+	s := searchStore(t)
+	seedSearch(t, s, seedSpec{sha: "aaa", path: "/models/a.safetensors", name: "A", baseModel: "SD 1.5"})
+	seedOwned(t, s, "aaa", "42", "100")
+	if err := s.PutOriginModelStatus(OriginModelStatus{
+		Provider: "civitai", ModelID: "42",
+		LatestVersionID: "200", LatestVersionName: "v2.0",
+		LatestBaseModel: "SDXL 1.0", HTTPStatus: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.Search(SearchQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Hits) != 1 {
+		t.Fatalf("got %d hits, want 1", len(res.Hits))
+	}
+	h := res.Hits[0]
+	if !h.UpdateAvailable {
+		t.Error("UpdateAvailable is false for a model with a newer version")
+	}
+	if h.HaveVersionName != "v100" || h.LatestVersionName != "v2.0" {
+		t.Errorf("have/latest names = %q/%q", h.HaveVersionName, h.LatestVersionName)
+	}
+	if h.UpdateCheckedAt == "" {
+		t.Error("UpdateCheckedAt is empty, so the UI cannot age the badge")
+	}
+	if !h.UpdateBaseModelChanged {
+		t.Error("a base-model change was not flagged on the hit")
+	}
+}
+
+// The LEFT JOIN in Search is only safe because the view is one row per sha.
+func TestSearchReturnsOneRowPerModelWithTwoOriginProviders(t *testing.T) {
+	s := searchStore(t)
+	seedSearch(t, s, seedSpec{sha: "aaa", path: "/models/a.safetensors", name: "A"})
+	seedOwned(t, s, "aaa", "42", "100")
+	if err := s.PutModelOrigin(ModelOrigin{
+		SHA256: "aaa", Provider: "civarchive", ModelID: "42", VersionID: "100",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedUpstream(t, s, "42", "200", "")
+	if err := s.PutOriginModelStatus(OriginModelStatus{
+		Provider: "civarchive", ModelID: "42", LatestVersionID: "200", HTTPStatus: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := s.Search(SearchQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Hits) != 1 || res.Total != 1 {
+		t.Errorf("got %d hits (total %d) for one file known to two providers, want 1",
+			len(res.Hits), res.Total)
+	}
+}

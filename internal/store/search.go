@@ -21,10 +21,19 @@ type SearchQuery struct {
 	Origins    []string
 	Formats    []string
 
-	// HasPreview, NSFW and Present are tri-state: nil means "do not filter".
+	// HasPreview, NSFW, Present and NeedsUpdate are tri-state: nil means "do
+	// not filter".
 	HasPreview *bool
 	NSFW       *bool
 	Present    *bool
+
+	// NeedsUpdate selects models the last sweep found a newer upstream version
+	// for. False selects the rest, which deliberately includes models that have
+	// never been checked: an unchecked model is not known to need an update,
+	// and a third filter value for "unknown" would be a control nobody could
+	// read. The honest place to say "this answer is three weeks old" is
+	// SearchHit.UpdateCheckedAt, on the badge itself.
+	NeedsUpdate *bool
 
 	// NeedsAttention selects models with no name, no base model, or no preview
 	// -- use case 10, spotting the gaps.
@@ -55,6 +64,26 @@ type SearchHit struct {
 	PathCount    int      `json:"path_count"`
 	Present      bool     `json:"present"`
 	NSFW         *bool    `json:"nsfw,omitempty"`
+
+	// --- update badge ------------------------------------------------------
+	//
+	// Enough for the card to render "v3 -> v5" without a second request. The
+	// have-side is load-bearing: a badge that can only say "update" gives the
+	// user nothing to decide with.
+	UpdateAvailable   bool   `json:"update_available,omitempty"`
+	HaveVersionName   string `json:"have_version_name,omitempty"`
+	LatestVersionName string `json:"latest_version_name,omitempty"`
+
+	// UpdateCheckedAt is when the provider was last asked. Carried so the UI
+	// can age the badge instead of presenting a three-week-old answer with the
+	// same confidence as a fresh one -- the same concern RateLimited exists for
+	// on a truncated sweep, applied to a stored result.
+	UpdateCheckedAt string `json:"update_checked_at,omitempty"`
+
+	// UpdateBaseModelChanged marks an update that retargets a different base
+	// model. Computed on read rather than stored: it compares the record's own
+	// base_model, which the user can edit, against the upstream one.
+	UpdateBaseModelChanged bool `json:"update_base_model_changed,omitempty"`
 }
 
 // SearchResults is a page of hits.
@@ -132,6 +161,19 @@ func filterSQL(q SearchQuery, skip string) (string, []any) {
 		}
 		where = append(where,
 			clause+` (SELECT 1 FROM model_file_path p WHERE p.sha256 = f.sha256 AND p.present = 1)`)
+	}
+	if q.NeedsUpdate != nil && skip != "needs_update" {
+		clause := "EXISTS"
+		if !*q.NeedsUpdate {
+			clause = "NOT EXISTS"
+		}
+		// Through the model_update view rather than an inline join, so this
+		// predicate and the columns Search selects for the badge are one
+		// definition. filterSQL exists because Search and FacetCounts once
+		// disagreed about what a row was; a second spelling of "needs update"
+		// sitting beside it would reintroduce exactly that.
+		where = append(where,
+			clause+` (SELECT 1 FROM model_update u WHERE u.sha256 = f.sha256)`)
 	}
 	if q.NeedsAttention {
 		where = append(where, `(
@@ -225,9 +267,16 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
                COALESCE((SELECT p.path FROM model_file_path p
                           WHERE p.sha256 = f.sha256
                           ORDER BY p.present DESC, p.id LIMIT 1), ''),
-               (SELECT COUNT(*) FROM model_file_path p WHERE p.sha256 = f.sha256 AND p.present = 1)
+               (SELECT COUNT(*) FROM model_file_path p WHERE p.sha256 = f.sha256 AND p.present = 1),
+               COALESCE(u.have_version_name, ''), COALESCE(u.latest_version_name, ''),
+               COALESCE(u.checked_at, ''), COALESCE(u.latest_base_model, ''),
+               u.sha256 IS NOT NULL
           FROM model_file f
           LEFT JOIN model_record r ON r.sha256 = f.sha256
+          -- Safe as a LEFT JOIN only because the view guarantees at most one
+          -- row per sha; a duplicate would multiply result rows and break the
+          -- LIMIT below. Pinned by TestOneRowPerFileWithTwoOriginProviders.
+          LEFT JOIN model_update u ON u.sha256 = f.sha256
          WHERE %s
          ORDER BY %s %s, f.sha256 ASC
          LIMIT ? OFFSET ?`, whereSQL, order, direction)
@@ -244,9 +293,12 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
 		var h SearchHit
 		var nsfw *int64
 		var triggers *string
+		var latestBase string
 		if err := rows.Scan(&h.SHA256, &h.Format, &h.Size, &h.Name, &h.Type,
 			&h.BaseModel, &h.Version, &h.Origin, &nsfw, &triggers,
-			&h.PreviewImage, &h.Path, &h.PathCount); err != nil {
+			&h.PreviewImage, &h.Path, &h.PathCount,
+			&h.HaveVersionName, &h.LatestVersionName, &h.UpdateCheckedAt,
+			&latestBase, &h.UpdateAvailable); err != nil {
 			return nil, err
 		}
 		if nsfw != nil {
@@ -258,6 +310,7 @@ func (s *Store) Search(q SearchQuery) (*SearchResults, error) {
 		}
 		h.Present = h.PathCount > 0
 		h.Filename = FilenameOf(h.Path)
+		h.UpdateBaseModelChanged = h.UpdateAvailable && baseModelChanged(h.BaseModel, latestBase)
 		results.Hits = append(results.Hits, h)
 	}
 	if err := rows.Err(); err != nil {
@@ -421,6 +474,12 @@ type Facets struct {
 	// matches" and "there is nothing here yet" need different advice, and once
 	// Total became filter-aware there was nothing left to tell them apart.
 	LibraryTotal int `json:"library_total"`
+
+	// NeedsUpdate is how many models have a newer version upstream, with the
+	// needs_update filter itself lifted -- the same rule every other facet
+	// follows. Without lifting it, the count beside an active toggle would
+	// equal the result count and turning it off would look like a no-op.
+	NeedsUpdate int `json:"needs_update"`
 }
 
 // FacetCounts summarizes what the current query matches, for building filter UI.
@@ -519,6 +578,17 @@ func (s *Store) FacetCounts(q SearchQuery) (*Facets, error) {
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM model_file`).Scan(&f.LibraryTotal); err != nil {
 		return nil, err
+	}
+
+	// Its own filter lifted, like every other facet.
+	nuWhere, nuArgs := filterSQL(q, "needs_update")
+	if err := s.db.QueryRow(`
+        SELECT COUNT(*) FROM model_file f
+          LEFT JOIN model_record r ON r.sha256 = f.sha256
+         WHERE `+nuWhere+`
+           AND EXISTS (SELECT 1 FROM model_update u WHERE u.sha256 = f.sha256)`,
+		nuArgs...).Scan(&f.NeedsUpdate); err != nil {
+		return nil, fmt.Errorf("store: facet counts (needs_update): %w", err)
 	}
 	return f, nil
 }

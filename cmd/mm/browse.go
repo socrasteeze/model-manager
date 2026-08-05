@@ -185,6 +185,8 @@ is not a drop-in replacement.`)
 	limit := fs.Int("limit", 0, "check at most this many models (0 for all)")
 	apiKey := fs.String("api-key", "", "Civitai API key (default: CIVITAI_API_KEY)")
 	asJSON := fs.Bool("json", false, "emit raw JSON")
+	stored := fs.Bool("stored", false, "report what the last check found, without asking the provider")
+	maxAge := fs.Duration("max-age", 0, "skip models checked more recently than this")
 	allowNetDB := fs.Bool("allow-network-db", false, "permit a database on a network filesystem")
 
 	if err := fs.Parse(args); err != nil {
@@ -197,41 +199,40 @@ is not a drop-in replacement.`)
 	}
 	defer st.Close()
 
-	idx, err := origin.BuildLocalIndex(st)
-	if err != nil {
-		return err
-	}
-
-	client := origin.NewClient()
-	if *apiKey != "" {
-		client.APIKey = *apiKey
-	}
-
-	updates, stats, err := origin.CheckUpdates(ctx, idx, origin.UpdateOptions{
-		Client: client,
-		Limit:  *limit,
-		Logf:   func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
-		Progress: func(done, total int) {
-			if total > 0 {
-				fmt.Fprintf(os.Stderr, "\r  %d/%d models   ", done, total)
-			}
-		},
-	})
-	fmt.Fprintln(os.Stderr)
-	if err != nil {
-		return err
-	}
-
-	// Flagging a changed base model needs the resolved local record, which the
-	// checker deliberately does not reach into the store for.
-	origin.MarkBaseModelChanges(updates, func(sha string) string {
-		rec, err := st.GetModelRecord(sha)
-		if err != nil || rec == nil {
-			return ""
+	// The sweep records into the same tables the UI reads, rather than
+	// computing an answer that lives only in this process. Otherwise running
+	// this would warm nothing and the library's badge would stay empty --
+	// exactly the two-sources-of-truth split this project avoids elsewhere.
+	stats := &origin.UpdateStats{}
+	if !*stored {
+		client := origin.NewClient()
+		if *apiKey != "" {
+			client.APIKey = *apiKey
 		}
-		return rec.BaseModel
-	})
+		stats, err = origin.SweepUpdates(ctx, st, origin.SweepOptions{
+			Client: client,
+			Limit:  *limit,
+			MaxAge: *maxAge,
+			Logf:   func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
+			Progress: func(done, total int, _ origin.UpdateStats) {
+				if total > 0 {
+					fmt.Fprintf(os.Stderr, "\r  %d/%d models   ", done, total)
+				}
+			},
+		})
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return err
+		}
+	}
 
+	// Read back what is stored rather than what this run happened to see: a
+	// model checked on an earlier run still needs reporting, and the view
+	// already excludes updates whose file has since been downloaded.
+	updates, err := st.PendingUpdates(0)
+	if err != nil {
+		return err
+	}
 	sort.Slice(updates, func(i, j int) bool { return updates[i].Name < updates[j].Name })
 
 	if *asJSON {
@@ -255,7 +256,7 @@ is not a drop-in replacement.`)
 	for _, u := range updates {
 		note := ""
 		if u.BaseModelChanged {
-			note = "base model changed to " + u.BaseModel
+			note = "base model changed to " + u.LatestBaseModel
 		}
 		size := "-"
 		if u.SizeBytes > 0 {

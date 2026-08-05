@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
@@ -25,6 +24,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/scan"
 	"github.com/socrasteeze/model-manager/internal/scanjob"
 	"github.com/socrasteeze/model-manager/internal/store"
+	"github.com/socrasteeze/model-manager/internal/updatejob"
 )
 
 // Config configures a Server.
@@ -61,6 +61,11 @@ type Config struct {
 	// no client there is nobody to ask.
 	Enrich *enrichjob.Manager
 
+	// Updates enables background update sweeps. Nil leaves update checking to
+	// `mm updates`. A sweep writes to the library, so it follows the same
+	// --writable rule as enrichment, and needs Origin for the same reason.
+	Updates *updatejob.Manager
+
 	// Origin enables remote browsing and update checking. Nil disables both
 	// endpoints: those are the only ones that contact a *third party*, so an
 	// operator who does not want the daemon talking to Civitai, HuggingFace or
@@ -82,10 +87,6 @@ type Server struct {
 	mux     *http.ServeMux
 	handler http.Handler
 	started time.Time
-
-	// updateCheck is the single-flight latch for /api/updates; see
-	// handleUpdates for why concurrency there is capped at one.
-	updateCheck atomic.Bool
 
 	// comfyClientMu guards a cached comfy.Client, so a status probe or a
 	// render does not build a fresh http.Client -- and abandon the previous
@@ -168,6 +169,8 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("GET /api/browse", s.handleBrowse)
 	s.mux.HandleFunc("GET /api/updates", s.handleUpdates)
+	s.mux.HandleFunc("POST /api/updates", s.handleStartUpdates)
+	s.mux.HandleFunc("DELETE /api/updates/{id}", s.handleCancelUpdates)
 	s.mux.HandleFunc("GET /api/remote-image", s.handleRemoteImage)
 
 	s.mux.HandleFunc("POST /api/downloads", s.handleCreateDownload)

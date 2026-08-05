@@ -289,9 +289,32 @@ func openAPISpec(version string) []byte {
 				queryParam("sort", "Provider sort order"),
 				queryParam("page", "Page number"),
 				queryParam("nsfw", "Permit adult results")),
-			"/api/updates": get(
-				"Models held for which the origin now publishes a newer version",
-				"Browse", jsonResponse(object(nil))),
+			// Reading is separate from checking on purpose. The GET used to
+			// perform the whole sweep inline and throw the answer away when the
+			// tab closed; now it reads what the last sweep recorded, so the
+			// result survives a restart and can be filtered on.
+			"/api/updates": map[string]any{
+				"get": operation(
+					"Models held for which the origin publishes a newer version, as of "+
+						"the last check. Reads stored data -- no network, and available "+
+						"even on a --no-remote daemon, which can still show what an "+
+						"earlier check found.",
+					"Updates", jsonResponse(object(nil)),
+					queryParam("limit", "Maximum returned")),
+				"post": operation(
+					"Start a background update sweep: one throttled request per owned "+
+						"model. Refused with 409 while an enrichment sweep is running, "+
+						"since both spend the same provider rate limit.",
+					"Updates", jsonResponse(object(nil)),
+					queryParam("limit", "Check at most this many models (0 for all)"),
+					queryParam("max_age_hours", "Skip models checked more recently than this")),
+			},
+			"/api/updates/{id}": map[string]any{
+				"delete": operation(
+					"Stop the running sweep. Everything already recorded stays "+
+						"recorded, and re-running continues where this left off.",
+					"Updates", emptyResponse(), pathParam("id", "Update run id")),
+			},
 
 			// --- enrichment ------------------------------------------------
 			// Everything fetched is recorded as an ordinary origin-tier
