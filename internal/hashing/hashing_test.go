@@ -125,6 +125,77 @@ func TestHeaderRewritePreservesWeightsHash(t *testing.T) {
 // A .ckpt cannot have its weights region located without unpickling it, which is
 // forbidden. The empty string here becomes SQL NULL -- "no rebinding key" -- and
 // must never be a digest of nothing that reads like a real value.
+// TestFullNamedClassifiesByTheGivenName is why FullNamed exists.
+//
+// A download verifies its bytes while they are still called "<id>.part". Format
+// detection reads an extension, so hashing them under that name yields no
+// header blob and no weights hash -- and nothing later supplies them, because
+// the next scan matches the cache key and never opens the file again.
+func TestFullNamedClassifiesByTheGivenName(t *testing.T) {
+	body := buildSafetensors(`{"w":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}`,
+		[]byte{1, 2, 3, 4})
+	dir := t.TempDir()
+	part := filepath.Join(dir, "8f3a1c22.part")
+	if err := os.WriteFile(part, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The bug's fingerprint: the same bytes under the staging name.
+	bare, err := New(0, 0).Full(part)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.Format != "unknown" {
+		t.Fatalf("a .part detected as %q; this test no longer proves anything", bare.Format)
+	}
+	if bare.WeightsSHA256 != "" || bare.Header.Blob != nil {
+		t.Errorf("unknown format produced a weights hash or header blob: %+v", bare)
+	}
+
+	// The same bytes, named for where they are going.
+	named, err := New(0, 0).FullNamed(part, "watercolour.safetensors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named.Format != "safetensors" {
+		t.Errorf("format = %q, want safetensors", named.Format)
+	}
+	if named.WeightsSHA256 == "" {
+		t.Error("no weights hash; the rebinding key would be permanently absent")
+	}
+	if named.Header.Blob == nil {
+		t.Error("no header blob captured")
+	}
+
+	// The name moves the format and nothing else. Every other fact comes from
+	// the bytes or the descriptor, so it must match the bare read exactly.
+	if named.SHA256 != bare.SHA256 {
+		t.Errorf("content hash moved with the name: %s vs %s", named.SHA256, bare.SHA256)
+	}
+	if named.ProbeSHA256 != bare.ProbeSHA256 || named.Size != bare.Size ||
+		named.MtimeNs != bare.MtimeNs || named.BytesRead != bare.BytesRead {
+		t.Errorf("a fact other than format moved with the name:\n bare=%+v\nnamed=%+v", bare, named)
+	}
+}
+
+// Full must be exactly FullNamed with the path as its own name, or the two
+// drift and a scan disagrees with a download about the same file.
+func TestFullIsFullNamedWithItsOwnPath(t *testing.T) {
+	path := writeFile(t, "m.safetensors", buildSafetensors(
+		`{"w":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}`, []byte{1, 2, 3, 4}))
+	a, err := New(0, 0).Full(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(0, 0).FullNamed(path, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.SHA256 != b.SHA256 || a.Format != b.Format || a.WeightsSHA256 != b.WeightsSHA256 {
+		t.Errorf("Full and FullNamed disagree:\n%+v\n%+v", a, b)
+	}
+}
+
 func TestPickleHasNoWeightsHash(t *testing.T) {
 	path := writeFile(t, "m.ckpt", bytes.Repeat([]byte{0x80, 0x02}, 100))
 	res, err := New(0, 0).Full(path)

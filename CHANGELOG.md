@@ -45,6 +45,10 @@ Every entry links to the full release notes for that version.
 - A model the provider has removed is marked as gone and stops being re-checked,
   and its record is shown as the surviving copy. Before this, a model that 404'd
   once was re-asked on every update check for the life of the library.
+- A downloaded file is now read once instead of twice. It used to be hashed to
+  verify it and then read again in full to record it, so a 12 GB model cost 24 GB
+  of reading — on the smallest disks, for the largest files. The published copy is
+  also verified now, which the second read had been doing by accident.
 - Downloads now check free space before starting. A transfer that cannot fit is
   refused in the first second with both numbers, instead of filling the disk and
   leaving a partial file behind. Both filesystems are checked: a download is

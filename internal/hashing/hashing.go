@@ -77,7 +77,36 @@ func New(bufferSize, maxHeaderBytes int) *Hasher {
 }
 
 // Full reads the entire file once and returns every identity derived from it.
-func (h *Hasher) Full(path string) (Result, error) {
+func (h *Hasher) Full(path string) (Result, error) { return h.FullNamed(path, path) }
+
+// FullNamed is Full for bytes that are not yet living under their own name.
+//
+// Format detection reads an extension and nothing else, and the format decides
+// the whole header-shaped half of a Result: the blob, the weights offset, and
+// through it WeightsSHA256. A download verifies its bytes while they are still
+// called "<jobID>.part", which detects as unknown -- so hashing them under that
+// name would record format "unknown", no header blob and no weights hash for
+// every model that ever arrived through a download.
+//
+// None of that is self-healing, which is why this seam exists rather than a
+// second read. UpsertFileAndPath rewrites format unconditionally from the new
+// value, so one such write replaces a correct one; and while the weights hash
+// and header blob are COALESCE-protected against being overwritten with
+// nothing, nothing ever supplies them afterwards -- the next scan of that root
+// matches the (device, inode, size, mtime) cache key and never opens the file
+// again. A model indexed once without its rebinding key keeps none until
+// somebody runs a verify pass by hand.
+//
+// nameForFormat is the name the bytes will answer to; path is where they are
+// right now. Only DetectFormat sees the name. Every other fact in a Result
+// comes from the bytes or from the descriptor -- both stats are taken through
+// it -- so a name that is not the path cannot move a hash, a size or an mtime.
+//
+// A name rather than a format string, deliberately: handing a caller a format
+// to choose would let it assert one this package would never derive for that
+// name, and routing both callers through the same DetectFormat leaves the
+// download path and a later scan of the published file unable to disagree.
+func (h *Hasher) FullNamed(path, nameForFormat string) (Result, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Result{}, fmt.Errorf("hashing: opening %s: %w", path, err)
@@ -94,7 +123,7 @@ func (h *Hasher) Full(path string) (Result, error) {
 	size := preInfo.Size()
 	preMtime := preInfo.ModTime().UnixNano()
 
-	format := modelformat.DetectFormat(path)
+	format := modelformat.DetectFormat(nameForFormat)
 	header := modelformat.Read(f, format, size, h.maxHeaderBytes)
 
 	weightsOffset := header.WeightsOffset

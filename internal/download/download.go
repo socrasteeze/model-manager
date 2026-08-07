@@ -27,7 +27,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"net/http"
 	neturl "net/url"
@@ -38,6 +37,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/socrasteeze/model-manager/internal/hashing"
 )
 
 // ErrChecksumMismatch means the bytes that arrived are not the bytes that were
@@ -56,6 +57,27 @@ var ErrNoSpace = errors.New("download: no space left on device")
 // the current job snapshot alongside it, so an HTTP layer can answer with the
 // in-progress state rather than an opaque refusal.
 var ErrInFlight = errors.New("download: job already in flight")
+
+// ErrPartialUnstable means the partial's size or mtime moved across two
+// successive verification reads, so what was hashed may be a mix of two states.
+//
+// The partial is kept rather than quarantined. Nothing this Manager runs can
+// cause it -- the transfer closes the file before the hash begins, and a second
+// job with the same ID is refused -- so it points at either a writer outside
+// this process or, far more often, a work directory on a network share whose
+// attribute cache makes two stats of one untouched file disagree. Destroying a
+// completed multi-gigabyte transfer to guard against the rarer of those is the
+// wrong trade; the job fails and the bytes stay where a retry can use them.
+var ErrPartialUnstable = errors.New("download: the partial changed while it was being verified")
+
+// ErrCopyCorrupted means a cross-filesystem publish wrote bytes that do not
+// hash to the value the partial was verified against.
+//
+// Deliberately not a quarantine either. The partial passed verification and the
+// destination filesystem is what failed, so destroying a resume holding
+// known-good bytes would force a full re-transfer to recover from a local write
+// fault. The unverified copy is removed from the model tree; the partial stays.
+var ErrCopyCorrupted = errors.New("download: the published copy is not the verified bytes")
 
 // State is where a job is.
 type State string
@@ -195,7 +217,18 @@ type Manager struct {
 	// the manager lock. A non-empty return is recorded as the job's
 	// IndexError. This is how the daemon indexes a finished file without the
 	// download package importing the store.
-	OnComplete func(Job) string
+	//
+	// The second argument is the identity the verification pass already
+	// established for these bytes, so the indexer records the model without
+	// reading it a second time -- twelve gigabytes of disk for a twelve
+	// gigabyte model instead of twenty-four. Nil means there is nothing to hand
+	// over and the indexer must read the file itself.
+	//
+	// An argument rather than a field on Job, because a Result carries a header
+	// blob of up to a few megabytes and the job map is pruned only on request:
+	// on the Job it would be held for the life of the process, for every
+	// download that ever completed.
+	OnComplete func(Job, *hashing.Result) string
 
 	// AfterComplete, when set, runs after OnComplete and only when OnComplete
 	// reported no error. A non-empty return is recorded as the job's MetaError.
@@ -419,13 +452,42 @@ func (m *Manager) run(ctx context.Context, job Job) (Job, error) {
 
 	m.update(job.ID, func(j *Job) { j.State = StateVerifying })
 
-	sum, size, err := hashFile(partial)
+	// The only full read of the transferred bytes. It produces every identity
+	// the indexer needs, so the file is not read a second time to record it.
+	//
+	// Named for the destination, not for the partial: format detection reads an
+	// extension, and "<id>.part" detects as unknown -- which would mean no header
+	// blob and no weights hash, permanently, for every downloaded model.
+	res, err := hashing.New(0, 0).FullNamed(partial, job.Filename)
 	if err != nil {
-		return fail(err)
+		if errors.Is(err, hashing.ErrChangedDuringHash) {
+			// The partial's stats moved across the read. Almost always this is a
+			// network work directory disagreeing with itself -- the database, and
+			// so the work directory beside it, is allowed onto a share, where
+			// attribute caching can make two stats of one unmodified file differ.
+			//
+			// So it is asked once more rather than acted on. Two independent full
+			// reads that agree are decisive; a writer genuinely mutating the file
+			// will not produce agreement, and cached-timestamp jitter will. Only a
+			// second disagreement is treated as real, and even then the partial is
+			// kept: destroying a completed multi-gigabyte transfer on the strength
+			// of a timestamp is a worse outcome than a failed job the operator can
+			// look at.
+			var retryErr error
+			res, retryErr = hashing.New(0, 0).FullNamed(partial, job.Filename)
+			if retryErr != nil {
+				return fail(fmt.Errorf("%w: %v", ErrPartialUnstable, retryErr))
+			}
+		} else {
+			return fail(err)
+		}
 	}
+	sum, size := res.SHA256, res.Size
 
 	m.update(job.ID, func(j *Job) {
 		j.ActualSHA = sum
+		// Repairs the byte count for a job completed through the 416 branch,
+		// which returns before the transfer loop records what is on disk.
 		j.Downloaded = size
 	})
 
@@ -444,7 +506,12 @@ func (m *Manager) run(ctx context.Context, job Job) (Job, error) {
 		return m.reject(job.ID, partial, reason, ErrSizeMismatch)
 	}
 
-	dest, err := m.publish(partial, job.DestDir, job.Filename)
+	// Failure here includes ErrCopyCorrupted, which is deliberately a fail and
+	// not a quarantine: the partial passed both checks above, so the bytes are
+	// good and the destination filesystem is what went wrong. Keeping the
+	// partial means a retry republishes it after one local read instead of
+	// pulling the whole model again to recover from a local write fault.
+	dest, err := m.publish(partial, job.DestDir, job.Filename, sum)
 	if err != nil {
 		return fail(err)
 	}
@@ -458,7 +525,7 @@ func (m *Manager) run(ctx context.Context, job Job) (Job, error) {
 	indexed := true
 	if m.OnComplete != nil {
 		final, _ := m.Job(job.ID)
-		if msg := m.OnComplete(final); msg != "" {
+		if msg := m.OnComplete(final, &res); msg != "" {
 			m.update(job.ID, func(j *Job) { j.IndexError = msg })
 			indexed = false
 		}
@@ -748,7 +815,19 @@ func (m *Manager) copyTracking(ctx context.Context, id string, dst io.Writer, sr
 // This is the only place the tool creates a file inside a model tree, and §14
 // permits it precisely because the destination is user-chosen and the content is
 // freshly downloaded rather than something that was already there.
-func (m *Manager) publish(partial, destDir, filename string) (string, error) {
+// wantSHA is the digest the partial was verified against, and it is what makes
+// the published file's identity provable rather than assumed. On the rename
+// path there is nothing to prove: dest is the very inode that was hashed. On
+// the copy path -- the normal one here -- every byte passes through this
+// process anyway, so digesting them costs one hash context over buffers the
+// copy is already moving.
+//
+// This check replaces one that used to happen by accident. The indexer's full
+// re-read of the published file was, incidentally, the only thing that ever
+// looked at what copyFile produced; without it a short or garbled copy would
+// become a model permanently recorded under a hash it does not have, with a
+// pulled-copy row beside it keyed on the good hash and pointing at nothing.
+func (m *Manager) publish(partial, destDir, filename, wantSHA string) (string, error) {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return "", fmt.Errorf("download: creating destination: %w", err)
 	}
@@ -759,13 +838,21 @@ func (m *Manager) publish(partial, destDir, filename string) (string, error) {
 	// where honouring that matters.
 	dest = uniquePath(dest)
 
-	if err := os.Rename(partial, dest); err == nil {
+	if err := renameFile(partial, dest); err == nil {
 		return dest, nil
 	}
 	// A rename across filesystems fails, which is the common case when the work
 	// directory is beside the database and the destination is on the array.
-	if err := copyFile(partial, dest); err != nil {
+	got, err := copyFile(partial, dest)
+	if err != nil {
 		return "", err
+	}
+	if wantSHA != "" && !strings.EqualFold(got, wantSHA) {
+		// Unverified bytes do not stay in a model tree. The partial is left
+		// alone: it passed verification, the destination is what failed, and it
+		// is the cheapest way back.
+		_ = os.Remove(dest)
+		return "", fmt.Errorf("%w: verified %s, the copy hashed %s", ErrCopyCorrupted, wantSHA, got)
 	}
 	if err := os.Remove(partial); err != nil {
 		// The file is published; a leftover partial is untidy, not a failure.
@@ -773,6 +860,15 @@ func (m *Manager) publish(partial, destDir, filename string) (string, error) {
 	}
 	return dest, nil
 }
+
+// renameFile is os.Rename, indirected so a test can reach the copy fallback.
+//
+// That branch only runs when the work directory and the model root are on
+// different filesystems, which is the ordinary deployment and yet impossible to
+// arrange on a CI runner with one volume. It is also the branch that now
+// carries the only verification the published bytes ever get, so leaving it
+// untested was not an option.
+var renameFile = os.Rename
 
 func uniquePath(path string) string {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -789,45 +885,51 @@ func uniquePath(path string) string {
 	return fmt.Sprintf("%s.%d%s", stem, time.Now().UnixNano(), ext)
 }
 
-func copyFile(src, dst string) error {
+// copyFile copies src to dst and returns the SHA256 of the bytes it wrote.
+//
+// The digest comes off the same buffers as the copy rather than from a
+// read-back: a second pass would double the cost of every cross-filesystem
+// publish for a guarantee only marginally stronger, and the failure this exists
+// to catch -- a truncated or garbled copy -- is visible in the stream.
+//
+// Synced before the rename, so the digest describes bytes that are actually on
+// the destination rather than bytes handed to the page cache. Without it a
+// crash between the two would leave a durable directory entry under a model
+// name pointing at a file that was never written.
+func copyFile(src, dst string) (string, error) {
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer in.Close()
 
 	tmp := dst + ".incoming"
 	out, err := os.Create(tmp)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	sum := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(out, sum), in); err != nil {
 		out.Close()
 		os.Remove(tmp)
-		return err
+		return "", err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return "", err
 	}
 	if err := out.Close(); err != nil {
 		os.Remove(tmp)
-		return err
+		return "", err
 	}
 	// Rename last, so a consuming tool never sees a partially copied model under
 	// its final name.
-	return os.Rename(tmp, dst)
-}
-
-func hashFile(path string) (string, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", 0, err
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return "", err
 	}
-	defer f.Close()
-
-	var h hash.Hash = sha256.New()
-	size, err := io.Copy(h, f)
-	if err != nil {
-		return "", 0, err
-	}
-	return hex.EncodeToString(h.Sum(nil)), size, nil
+	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
 // filenameFromURL takes the last path segment.

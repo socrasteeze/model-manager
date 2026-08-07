@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -47,12 +48,13 @@ func serveFilesServer(t *testing.T, mutate func(*Config)) *fileFixture {
 		t.Fatal(err)
 	}
 
-	// 8 KiB so a range request has something to range over, and non-uniform so a
-	// wrong offset produces a wrong body rather than the same byte repeated.
-	body := make([]byte, 8192)
-	for i := range body {
-		body[i] = byte(i * 7)
-	}
+	// A real safetensors file, not arbitrary bytes: the header is what carries
+	// the weights offset, and without one the whole header-shaped half of an
+	// identity is empty -- which would make a test asserting header capture pass
+	// for the wrong reason. 8 KiB total, so a range request has something to
+	// range over, and the tensor region is non-uniform so a wrong offset
+	// produces a wrong body rather than the same byte repeated.
+	body := safetensorsFixture(8192)
 	sum := sha256.Sum256(body)
 	sha := hex.EncodeToString(sum[:])
 
@@ -99,6 +101,26 @@ func serveFilesServer(t *testing.T, mutate func(*Config)) *fileFixture {
 func (f *fileFixture) get(t *testing.T, method string, headers map[string]string) *http.Response {
 	t.Helper()
 	return do(f.srv, method, "http://localhost/api/models/"+f.sha+"/file", "", headers).Result()
+}
+
+// safetensorsFixture builds a parseable safetensors file of exactly total
+// bytes: an 8-byte little-endian header length, a JSON header, then tensor data.
+func safetensorsFixture(total int) []byte {
+	const prefix = 8
+	header := `{"w":{"dtype":"F16","shape":[2],"data_offsets":[0,4]}}`
+	tensors := total - prefix - len(header)
+	if tensors < 0 {
+		panic("fixture too small for its header")
+	}
+	out := make([]byte, 0, total)
+	var n [8]byte
+	binary.LittleEndian.PutUint64(n[:], uint64(len(header)))
+	out = append(out, n[:]...)
+	out = append(out, header...)
+	for i := 0; i < tensors; i++ {
+		out = append(out, byte(i*7))
+	}
+	return out
 }
 
 func readAll(t *testing.T, resp *http.Response) []byte {

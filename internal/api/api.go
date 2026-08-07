@@ -21,6 +21,7 @@ import (
 	"github.com/socrasteeze/model-manager/internal/comfy"
 	"github.com/socrasteeze/model-manager/internal/download"
 	"github.com/socrasteeze/model-manager/internal/enrichjob"
+	"github.com/socrasteeze/model-manager/internal/hashing"
 	"github.com/socrasteeze/model-manager/internal/jobrun"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/scan"
@@ -173,8 +174,13 @@ func New(cfg Config) *Server {
 	// DestRoot, and a failure lands on the job as IndexError instead of
 	// vanishing.
 	if cfg.Downloads != nil && cfg.Store != nil {
-		cfg.Downloads.OnComplete = func(j download.Job) string {
-			if _, err := scan.IndexFile(cfg.Store, j.FinalPath, j.DestRoot); err != nil {
+		// The identity from the transfer's own verification pass is handed
+		// straight to the indexer, so a downloaded model is read once rather
+		// than twice. The indexer still re-derives everything about the file's
+		// location, and falls back to a full read if what it is handed does not
+		// describe the file that landed.
+		cfg.Downloads.OnComplete = func(j download.Job, res *hashing.Result) string {
+			if _, err := scan.IndexPublished(cfg.Store, j.FinalPath, j.DestRoot, res); err != nil {
 				return err.Error()
 			}
 			return ""

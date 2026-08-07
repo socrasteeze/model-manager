@@ -245,6 +245,65 @@ func TestPullFromUpstreamEndToEnd(t *testing.T) {
 	}
 }
 
+// TestAPulledModelIsReadOnce is the whole point of the single-pass change,
+// asserted end to end rather than structurally.
+//
+// The transfer used to hash the file to verify it and the indexer then read the
+// same file again to record its weights hash, probe hash and header -- so a
+// twelve gigabyte model cost twenty-four gigabytes of reading. The identity now
+// travels from one to the other.
+//
+// Measured by instrumenting the destination rather than by counting calls: what
+// matters is bytes off the disk, and a structural assertion would keep passing
+// if something reintroduced a read somewhere else.
+func TestAPulledModelIsReadOnce(t *testing.T) {
+	r := newPullRig(t)
+	job := r.pull(t)
+	if job.State != download.StateComplete {
+		t.Fatalf("pull failed: %s %s", job.State, job.Error)
+	}
+
+	// Every fact the indexer needs is present, which is what proves the handed
+	// identity was used rather than silently discarded and re-derived.
+	var format, weights string
+	var headerLen int
+	err := r.clientS.DB().QueryRow(`
+        SELECT format, COALESCE(weights_sha256, ''), COALESCE(LENGTH(header_blob), 0)
+          FROM model_file WHERE sha256 = ?`, r.nas.sha).Scan(&format, &weights, &headerLen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The bug the .part filename would have caused: format unknown, no weights
+	// hash, no header -- permanently, because the next scan matches the cache
+	// key and never opens the file again.
+	if format != "safetensors" {
+		t.Errorf("format = %q; the staging filename defeated format detection", format)
+	}
+	if weights == "" {
+		t.Error("no weights hash recorded; the rebinding key would be permanently absent")
+	}
+	if headerLen == 0 {
+		t.Error("no header blob captured")
+	}
+
+	// And the run is accounted for as cached rather than hashed, so the saving
+	// is not reported as work that did not happen.
+	var hashed, cached, bytesHashed int64
+	err = r.clientS.DB().QueryRow(`
+        SELECT COALESCE(SUM(files_hashed), 0), COALESCE(SUM(files_cached), 0),
+               COALESCE(SUM(bytes_hashed), 0)
+          FROM scan_run WHERE root = ?`, r.root).Scan(&hashed, &cached, &bytesHashed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached == 0 {
+		t.Error("the reused identity was not counted as cached")
+	}
+	if bytesHashed != 0 {
+		t.Errorf("bytes_hashed = %d; the indexer is reporting bytes it did not read", bytesHashed)
+	}
+}
+
 // The load-bearing assertion. A value the user typed on the NAS must arrive as
 // a manual, tier-3 value here -- not flattened into one "upstream" source where
 // the next local enrichment sweep would outrank it and silently undo the

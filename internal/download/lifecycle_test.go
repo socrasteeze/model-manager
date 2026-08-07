@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/socrasteeze/model-manager/internal/hashing"
 )
 
 // TestTokenIsScopedByHost is the leak test: one Manager serving two hosts must
@@ -290,7 +292,7 @@ func TestOnCompleteErrorRecorded(t *testing.T) {
 	defer srv.Close()
 
 	m := newManager(t)
-	m.OnComplete = func(j Job) string { return "boom" }
+	m.OnComplete = func(j Job, _ *hashing.Result) string { return "boom" }
 
 	job, err := m.Fetch(context.Background(), Job{URL: srv.URL + "/g.bin", DestDir: t.TempDir()})
 	if err != nil {
@@ -522,7 +524,7 @@ func TestAfterCompleteIsSeparateFromIndexing(t *testing.T) {
 	defer srv.Close()
 
 	m := newManager(t)
-	m.OnComplete = func(j Job) string { return "" }
+	m.OnComplete = func(j Job, _ *hashing.Result) string { return "" }
 	m.AfterComplete = func(j Job) string { return "metadata did not come across" }
 
 	job, err := m.Fetch(context.Background(), Job{URL: srv.URL + "/g.bin", DestDir: t.TempDir()})
@@ -552,7 +554,7 @@ func TestAfterCompleteSkippedWhenIndexingFailed(t *testing.T) {
 
 	ran := false
 	m := newManager(t)
-	m.OnComplete = func(j Job) string { return "boom" }
+	m.OnComplete = func(j Job, _ *hashing.Result) string { return "boom" }
 	m.AfterComplete = func(j Job) string { ran = true; return "should not appear" }
 
 	job, err := m.Fetch(context.Background(), Job{URL: srv.URL + "/g.bin", DestDir: t.TempDir()})
