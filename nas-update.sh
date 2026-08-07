@@ -29,7 +29,13 @@ fi
 REPO="socrasteeze/model-manager"
 BRANCH="${BRANCH:-main}"
 APP_NAME="model-manager"
-APP_DIR="$HOME/model-manager"
+
+# Where the fetched source lands, and NOT $HOME/model-manager, which is what
+# the naming convention would otherwise suggest. This directory is replaced
+# wholesale on every run, and $HOME/<app-name> is exactly where someone would
+# also keep a working checkout of the same app. Overridable in the settings
+# file; guarded below regardless.
+APP_DIR="${APP_DIR:-$HOME/model-manager-deploy}"
 
 # Container paths, deliberately not configurable.
 #
@@ -91,6 +97,16 @@ VERSION="$(basename "$SRC" | sed 's/.*-//')"
 echo "    $BRANCH is at $VERSION"
 
 # --- install -----------------------------------------------------------------
+
+# Never replace a working checkout. What follows deletes and rewrites this
+# directory, and losing a clone with unpushed work in it to a deploy script is
+# not a recoverable mistake -- so it is checked rather than trusted to naming.
+if [ -e "$APP_DIR/.git" ]; then
+  echo "nas-update: $APP_DIR holds a git checkout, and this replaces its" >&2
+  echo "  contents on every run. Set APP_DIR to somewhere else in $CONF," >&2
+  echo "  or move that checkout aside first. Nothing has been changed." >&2
+  exit 1
+fi
 
 echo "==> installing into $APP_DIR"
 mkdir -p "$APP_DIR"

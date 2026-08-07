@@ -25,11 +25,17 @@ NAS.
 On the NAS:
 
 ```sh
-mkdir -p ~/model-manager && cd ~/model-manager
+mkdir -p ~/model-manager-deploy && cd ~/model-manager-deploy
 curl -fSL -o nas-update.sh \
   -H "Accept: application/vnd.github.raw" \
   "https://api.github.com/repos/socrasteeze/model-manager/contents/nas-update.sh?ref=main"
 ```
+
+`model-manager-deploy`, not `model-manager`. This directory is deleted and
+rewritten on every update, and the shorter name is exactly where a working
+checkout of the same project tends to live. The script refuses to run if it
+finds a `.git` inside `APP_DIR`, but the naming is the first line of defence
+and the refusal is the second.
 
 Fetch it there rather than copying it through Windows — a copy that picks up CRLF
 makes `/bin/sh` read `set -eu\r` and fail with `: invalid option`, which names
@@ -138,3 +144,4 @@ wraps the archive in and passes it to the build.
 | Refuses to start, names a filesystem | The database landed on a network mount; move `STATE_DIR` to local storage |
 | Downloads refused with two numbers | Genuinely out of space, in the state directory or at the destination |
 | Library empty after an update | The mounts moved to different container paths; put them back |
+| Refuses to run, names a git checkout | `APP_DIR` points at a clone; this wipes that directory, so point it elsewhere |
