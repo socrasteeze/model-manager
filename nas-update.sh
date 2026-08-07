@@ -150,6 +150,26 @@ else
   cp -a "$SRC"/. "$APP_DIR"/
 fi
 
+# --- hand over if this script itself changed ----------------------------------
+
+# The logic running right now is the copy that was installed before the fetch,
+# because the re-exec at the top duplicates the old file. So without this, a
+# change to how the container is run takes two invocations to land: the first
+# installs the new script and then deploys using the old rules, reporting
+# success while quietly ignoring the fix it just downloaded.
+#
+# Hand over to the freshly installed version instead, so one invocation always
+# converges. UPDATER_HANDOVER survives the new copy's own re-exec and stops this
+# from bouncing more than once; cmp missing is not fatal, it just restores the
+# old two-run behaviour rather than refusing to deploy.
+if [ -z "${UPDATER_HANDOVER:-}" ] && command -v cmp >/dev/null 2>&1 &&
+   ! cmp -s "$0" "$APP_DIR/nas-update.sh"; then
+  echo "==> the updater itself changed; continuing with the new one"
+  UPDATER_HANDOVER=1
+  export UPDATER_HANDOVER
+  exec sh "$APP_DIR/nas-update.sh" "$@"
+fi
+
 # --- build -------------------------------------------------------------------
 
 echo "==> building $APP_NAME:$VERSION"
