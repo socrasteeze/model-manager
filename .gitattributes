@@ -7,5 +7,18 @@
 # stops meaning what it says -- either failing a good release or, worse, being
 # routinely ignored until it misses a real one.
 #
-# Treated as binary so what is stored is what is compared, everywhere.
+# Treated as verbatim so what is stored is what is compared, everywhere.
 internal/webui/dist/** -text
+
+# And the same for the build's inputs, which is where the drift actually came
+# from. Vite copies web/public straight through without touching line endings,
+# so a Windows checkout that turned these into CRLF produced a bundle a Linux
+# build could never reproduce -- the release check caught it as a stale UI,
+# which is exactly the wrong diagnosis but the right refusal.
+web/public/** -text
+
+# The page template, for the same reason: Vite substitutes the asset tags into
+# it and writes the rest through unchanged, so its line endings end up in the
+# shipped index.html. Everything else under web/src is parsed and re-emitted by
+# the bundler, which normalizes on its own.
+web/index.html -text
