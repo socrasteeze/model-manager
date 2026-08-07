@@ -173,9 +173,34 @@ mkdir -p "$STATE_DIR" "$MODELS_DIR"
 # Built with set -- rather than a word-split string so a path containing a
 # space survives.
 set --
+
+# Host networking by default, and the reason is not performance.
+#
+# Docker's userland proxy rewrites the source address of every published
+# connection to the bridge gateway, so the daemon sees 172.17.0.1 no matter who
+# actually connected. That silently destroys every decision made from the
+# client's address: --tailnet can never match, and --trust-cidr can only be
+# satisfied by trusting the whole bridge -- which would exempt every host on the
+# LAN while looking like it exempted only the tailnet.
+#
+# Host networking keeps the real address, so "a tailnet client needs no token,
+# anyone else does" means what it says. It also takes docker-proxy out of the
+# path for multi-gigabyte model transfers, which is a real if secondary gain.
+#
+# The cost is that the port is claimed directly on the host and PORT's mapping
+# no longer applies -- the left-hand side is simply the port it binds.
+NETWORK_MODE="${NETWORK_MODE:-host}"
+if [ "$NETWORK_MODE" = "host" ]; then
+  set -- --network host
+  BIND_PORT="$HOST_PORT"
+else
+  set -- -p "$PORT"
+  BIND_PORT="$CONTAINER_PORT"
+fi
+
 if [ -n "${ARCHIVE_DIR:-}" ]; then
   mkdir -p "$ARCHIVE_DIR"
-  set -- -v "$ARCHIVE_DIR:$C_ARCHIVE"
+  set -- "$@" -v "$ARCHIVE_DIR:$C_ARCHIVE"
 fi
 
 ALLOW_HOST_FLAGS=""
@@ -186,7 +211,7 @@ done
 # Only pass the optional settings that are actually set. The daemon reads these
 # straight out of the environment with no empty-string fallback of its own, so
 # handing it -e MM_CIVITAI_API="" is not the same as leaving it unset.
-ENV_FLAGS=""
+ENV_FLAGS="-e MM_HEALTH_PORT=$BIND_PORT"
 for name in CIVITAI_API_KEY HF_TOKEN MM_CIVITAI_API MM_HUGGINGFACE_API MM_CIVARCHIVE_API; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then
@@ -209,7 +234,6 @@ echo "==> restarting $APP_NAME"
 #
 # shellcheck disable=SC2086 -- the *_FLAGS variables are deliberate word splits
 "$DOCKER" run -d --name "$APP_NAME" --restart unless-stopped \
-  -p "$PORT" \
   --user "$CONTAINER_USER" \
   $ENV_FLAGS \
   -v "$MODELS_DIR":"$C_MODELS" \
@@ -217,7 +241,7 @@ echo "==> restarting $APP_NAME"
   -v "$STATE_DIR":"$C_STATE" \
   "$APP_NAME:latest" serve \
     --host 0.0.0.0 \
-    --port "$CONTAINER_PORT" \
+    --port "$BIND_PORT" \
     --db "$C_STATE/master.db" \
     --writable \
     --serve-files \

@@ -48,8 +48,11 @@ EXPOSE 8737
 # bound off-loopback requires a bearer token from every client, and nothing is
 # exempt by being local; see internal/api/security.go. Without that flag this
 # check gets an honest 401 and reports the container unhealthy forever.
+# Reads MM_HEALTH_PORT so the check follows a daemon moved off the default,
+# which host networking makes possible -- there the published port is whatever
+# the daemon binds, with no mapping to hide a mismatch.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD wget -q -O /dev/null http://127.0.0.1:8737/api/health || exit 1
+  CMD wget -q -O /dev/null "http://127.0.0.1:${MM_HEALTH_PORT:-8737}/api/health" || exit 1
 
 # Entrypoint rather than a baked command, so `docker run <image> serve --flags`
 # reads exactly like the CLI does everywhere else, and `docker exec <name> mm

@@ -59,7 +59,21 @@ sh ~/model-manager/nas-update.sh
 From a Windows desktop after that, `nas-refresh.bat` does the same thing over
 SSH. Set `MM_NAS_HOST` once with `setx` and reopen the terminal.
 
-## Four things that will otherwise cost you an afternoon
+## Five things that will otherwise cost you an afternoon
+
+**Bridge networking hides who is calling.** Docker's userland proxy rewrites the
+source address of every published connection to the bridge gateway, so the
+daemon sees `172.17.0.1` for every client no matter how they connected. Any
+decision made from the caller's address then collapses: `--tailnet` never
+matches, and the only `--trust-cidr` that would satisfy it is the whole bridge —
+which exempts every host that can reach the port while reading as though it
+exempted only the tailnet. That is the worst kind of security setting, one that
+looks narrow and is not.
+
+This deploys with `--network host` for that reason, not for speed. The real
+address survives, so "tailnet clients skip the token, everyone else presents
+one" means what it says. The cost is that the port is claimed directly on the
+host, so `PORT`'s mapping no longer applies and nothing else may hold it.
 
 **The daemon rejects host names it was not told about.** `ALLOW_HOSTS` must list
 every name and address the UI is opened by — the short name, any `.local` or
@@ -150,6 +164,7 @@ wraps the archive in and passes it to the build.
 |---|---|
 | Every request refused, connection fine | The `Host` you used is not in `ALLOW_HOSTS` |
 | Container reports unhealthy forever | `--trust-cidr 127.0.0.1/32` missing; the healthcheck gets an honest 401 |
+| 401 in a browser from a tailnet machine | Bridge networking is laundering the source address into `172.17.0.1`, so `--tailnet` cannot match. Use `NETWORK_MODE="host"` |
 | `: invalid option` running the script | CRLF line endings — refetch it on the NAS, or `tr -d '\r' < nas-update.sh > f && mv f nas-update.sh` |
 | Permission errors on every write | `CONTAINER_USER` does not own the mounts — check `ls -n` |
 | Mount is empty instead of your models | Path case: TOS uses `/Volume1`, DSM `/volume1` — check `df -h` |
