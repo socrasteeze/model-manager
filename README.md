@@ -115,6 +115,10 @@ The window is only a display: the same daemon simultaneously serves your phone
 and any other machine on your tailnet, which is why the UI is a local web server
 rather than a native GUI. See [native-vs-browser](docs/native-vs-browser.md).
 
+For the machine that actually holds the collection, `Dockerfile` and
+`nas-update.sh` run it as a container and update it from GitHub without needing
+git on the box — see [nas-deployment](docs/nas-deployment.md).
+
 Then, once the index is proven:
 
 ```sh

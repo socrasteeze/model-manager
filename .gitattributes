@@ -22,3 +22,13 @@ web/public/** -text
 # shipped index.html. Everything else under web/src is parsed and re-emitted by
 # the bundler, which normalizes on its own.
 web/index.html -text
+
+# The deployment scripts, pinned to the endings their interpreter needs rather
+# than to whatever the checking-out platform prefers.
+#
+# nas-update.sh is fetched onto a NAS and run by /bin/sh. One CR in it and the
+# first line becomes `set -eu\r`, which dies with ": invalid option" -- an error
+# that names neither the file nor the real cause. Pinning it here means no
+# checkout, tarball or copy can introduce one.
+*.sh  text eol=lf
+*.bat text eol=crlf

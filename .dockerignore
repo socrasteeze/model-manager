@@ -1,0 +1,23 @@
+# The build needs go.mod, go.sum, cmd/ and internal/ -- including the committed
+# bundle at internal/webui/dist, which is what gets embedded. Nothing else.
+
+.git
+.github
+.gitattributes
+
+bin/
+*.exe
+
+# The front-end source. Vite's output is committed under internal/webui/dist and
+# that is what the binary embeds; this directory is only needed to rebuild it,
+# which happens on a workstation with Node, never here.
+web/
+
+docs/
+examples/
+*.md
+
+# Never ship somebody's library into a build context.
+*.db
+*.db-wal
+*.db-shm

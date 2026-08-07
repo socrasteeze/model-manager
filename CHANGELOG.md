@@ -5,6 +5,22 @@ list internal refactors with no visible effect.
 
 Every entry links to the full release notes for that version.
 
+## [Unreleased]
+
+### Added
+
+- A `Dockerfile`, so the machine holding the library can run the daemon as a
+  container. The build needs only Go; the web UI is already committed and
+  embedded.
+- `nas-update.sh` and `nas-refresh.bat`, which deploy to a NAS that has no git.
+  The NAS fetches the branch as a source tarball from GitHub, builds the image
+  and restarts the container; one command from a desktop triggers it. Per-box
+  paths live in a settings file outside the repo. See
+  [`docs/nas-deployment.md`](docs/nas-deployment.md).
+- Shell and batch files now have their line endings pinned, so a deployment
+  script cannot reach a NAS with the carriage returns that make `/bin/sh` refuse
+  to run it.
+
 ## [v0.5.0](docs/release-notes/v0.5.0.md) — 2026-08-07
 
 ### Added
