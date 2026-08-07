@@ -46,14 +46,14 @@ Then the per-box settings, which live outside the repo so `rsync --delete`
 cannot wipe them on the next update:
 
 ```sh
-cp ~/model-manager/nas-deploy.env.example ~/.model-manager.env
+cp ~/model-manager-deploy/nas-deploy.env.example ~/.model-manager.env
 chmod 600 ~/.model-manager.env
 ```
 
 Edit it — every value is documented in the file — and run:
 
 ```sh
-sh ~/model-manager/nas-update.sh
+sh ~/model-manager-deploy/nas-update.sh
 ```
 
 From a Windows desktop after that, `nas-refresh.bat` does the same thing over
