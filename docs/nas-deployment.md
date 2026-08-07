@@ -157,3 +157,4 @@ wraps the archive in and passes it to the build.
 | Downloads refused with two numbers | Genuinely out of space, in the state directory or at the destination |
 | Library empty after an update | The mounts moved to different container paths; put them back |
 | Refuses to run, names a git checkout | `APP_DIR` points at a clone; this wipes that directory, so point it elsewhere |
+| Complains a setting is unset that you deliberately removed | The installed script checks settings before it updates itself, so a change to which settings are required cannot self-apply. Re-run the bootstrap `curl` once, then update as usual |
