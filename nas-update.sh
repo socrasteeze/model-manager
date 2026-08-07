@@ -70,7 +70,34 @@ ARCHIVE_INTERVAL="${ARCHIVE_INTERVAL:-6h}"
 HOST_PORT="${PORT%%:*}"
 CONTAINER_PORT="${PORT##*:}"
 
-command -v docker >/dev/null 2>&1 || { echo "nas-update: docker not found" >&2; exit 1; }
+# Resolve docker explicitly rather than trusting the PATH.
+#
+# On TOS the engine is installed under the apps directory and only a login
+# shell picks it up. A remote trigger runs `ssh host "sh nas-update.sh"`, which
+# is not a login shell, so a bare `docker` there is not found -- the update
+# would fail every time it was run the convenient way and work every time it
+# was tested by hand.
+if [ -z "${DOCKER:-}" ] && command -v docker >/dev/null 2>&1; then
+  DOCKER="$(command -v docker)"
+fi
+if [ -z "${DOCKER:-}" ]; then
+  for cand in /Volume1/@apps/DockerEngine/dockerd/bin/docker \
+              /volume1/@apps/DockerEngine/dockerd/bin/docker \
+              /usr/local/bin/docker /opt/bin/docker /usr/bin/docker; do
+    if [ -x "$cand" ]; then
+      DOCKER="$cand"
+      break
+    fi
+  done
+fi
+if [ -z "${DOCKER:-}" ]; then
+  # Last resort: ask a login shell, which is where the vendor sets its PATH.
+  DOCKER="$(bash -lc 'command -v docker' 2>/dev/null || true)"
+fi
+if [ -z "${DOCKER:-}" ] || [ ! -x "$DOCKER" ]; then
+  echo "nas-update: docker not found. Set DOCKER=/path/to/docker in $CONF" >&2
+  exit 1
+fi
 
 # --- fetch -------------------------------------------------------------------
 
@@ -126,7 +153,7 @@ fi
 # --- build -------------------------------------------------------------------
 
 echo "==> building $APP_NAME:$VERSION"
-docker build --build-arg VERSION="$VERSION" -t "$APP_NAME:latest" "$APP_DIR"
+"$DOCKER" build --build-arg VERSION="$VERSION" -t "$APP_NAME:latest" "$APP_DIR"
 
 # --- run ---------------------------------------------------------------------
 
@@ -152,8 +179,8 @@ for name in CIVITAI_API_KEY HF_TOKEN MM_CIVITAI_API MM_HUGGINGFACE_API MM_CIVARC
 done
 
 echo "==> restarting $APP_NAME"
-docker stop "$APP_NAME" >/dev/null 2>&1 || true
-docker rm   "$APP_NAME" >/dev/null 2>&1 || true
+"$DOCKER" stop "$APP_NAME" >/dev/null 2>&1 || true
+"$DOCKER" rm   "$APP_NAME" >/dev/null 2>&1 || true
 
 # --serve-files, --allow-archive and --allow-evict are each separate from
 # --writable on purpose: that flag has only ever meant "may add things", and
@@ -165,7 +192,7 @@ docker rm   "$APP_NAME" >/dev/null 2>&1 || true
 # for being local, so without it the check gets an honest 401 forever.
 #
 # shellcheck disable=SC2086 -- the *_FLAGS variables are deliberate word splits
-docker run -d --name "$APP_NAME" --restart unless-stopped \
+"$DOCKER" run -d --name "$APP_NAME" --restart unless-stopped \
   -p "$PORT" \
   --user "$CONTAINER_USER" \
   $ENV_FLAGS \
@@ -195,14 +222,14 @@ echo "==> verifying"
 i=0
 status=missing
 while [ "$i" -lt 15 ]; do
-  if ! status="$(docker inspect -f '{{.State.Status}}' "$APP_NAME" 2>/dev/null)"; then
+  if ! status="$("$DOCKER" inspect -f '{{.State.Status}}' "$APP_NAME" 2>/dev/null)"; then
     status=missing
     break
   fi
   if [ "$status" != "running" ]; then
     break
   fi
-  if docker exec "$APP_NAME" mm version >/dev/null 2>&1; then
+  if "$DOCKER" exec "$APP_NAME" mm version >/dev/null 2>&1; then
     break
   fi
   i=$((i + 1))
@@ -211,12 +238,12 @@ done
 
 if [ "$status" != "running" ]; then
   echo "nas-update: container is $status -- it did not stay up." >&2
-  docker logs --tail 20 "$APP_NAME" 2>&1 | sed 's/^/    /' >&2
+  "$DOCKER" logs --tail 20 "$APP_NAME" 2>&1 | sed 's/^/    /' >&2
   exit 1
 fi
 
 printf '    '
-docker exec "$APP_NAME" mm version 2>/dev/null || echo "(started, not answering yet)"
+"$DOCKER" exec "$APP_NAME" mm version 2>/dev/null || echo "(started, not answering yet)"
 
 cat <<EOF
 
