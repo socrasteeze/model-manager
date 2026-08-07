@@ -57,7 +57,11 @@ func (s *Server) enrichPrereq() (int, string, string) {
 		return http.StatusServiceUnavailable, "enrichment is not available",
 			"enrichment writes to the library, so it is offered only on a daemon started with --writable"
 	}
-	return 0, "", ""
+	// Added when the pairwise check became a group. This direction was missing
+	// before: an update sweep refused to start while enrichment ran, but
+	// enrichment happily started on top of an update sweep and the two then
+	// shared one rate limit between them.
+	return s.sharedThrottleFree(jobEnrich)
 }
 
 // handleEnrichModel handles POST /api/models/{sha}/enrich.

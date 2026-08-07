@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/api"
+	"github.com/socrasteeze/model-manager/internal/archivejob"
 	"github.com/socrasteeze/model-manager/internal/blobstore"
 	"github.com/socrasteeze/model-manager/internal/comfy"
 	"github.com/socrasteeze/model-manager/internal/download"
 	"github.com/socrasteeze/model-manager/internal/enrichjob"
+	"github.com/socrasteeze/model-manager/internal/jobrun"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/scan"
 	"github.com/socrasteeze/model-manager/internal/scanjob"
@@ -42,6 +44,10 @@ disk should not be reachable from a shared LAN without one.`)
 	tokenPath := fs_.String("token-file", "", "where to read/write the API token (default: alongside the database)")
 	noToken := fs_.Bool("no-token", false, "do not require a token even when bound off-loopback (unsafe)")
 	allowNetDB := fs_.Bool("allow-network-db", false, "permit a database on a network filesystem")
+	serveFiles := fs_.Bool("serve-files", false, "allow other machines to download indexed model files from this daemon")
+	allowEvict := fs_.Bool("allow-evict", false, "allow deleting local copies that were pulled from an upstream (requires --writable)")
+	allowArchive := fs_.Bool("allow-archive", false, "allow archiving models from providers, including on a timer (requires --writable)")
+	archiveInterval := fs_.Duration("archive-interval", 6*time.Hour, "how often to check the archive watchlist; 0 leaves the endpoint and disables the timer")
 	scanWorkers := fs_.Int("scan-workers", 1, "hashing workers per storage device for scans started from the UI")
 
 	var allowHosts rootList
@@ -102,23 +108,35 @@ disk should not be reachable from a shared LAN without one.`)
 	// Browsing and update checking are the only features that make outbound
 	// requests. Leaving the client unset is how an operator keeps the daemon
 	// from talking to third parties at all, without needing a firewall rule.
-	var originClient *origin.Client
-	if !*noRemote {
-		originClient = origin.NewClient()
+	//
+	// An upstream library is deliberately not one of those third parties -- the
+	// same distinction --no-remote already makes for a ComfyUI address below. So
+	// --no-remote silences Civitai, CivArchive and HuggingFace via NoThirdParty
+	// while leaving a NAS the operator configured themselves reachable, and the
+	// client is dropped entirely only when there is no upstream either, which is
+	// byte-for-byte the old behaviour.
+	originClient := origin.NewClient()
+	originClient.NoThirdParty = *noRemote
+	if *noRemote && !originClient.HasUpstream() {
+		originClient = nil
 	}
 
 	// Downloading additionally requires --writable. It creates files, and the
 	// read-only default exists precisely so a daemon cannot be talked into
 	// writing anything before the index is proven.
+	//
+	// Gated on the client existing rather than on !--no-remote, because pulling
+	// from an upstream is a copy across the local network: refusing it under a
+	// flag that means "do not contact third parties" would deny the one transfer
+	// that never leaves the operator's own machines.
 	var downloads *download.Manager
-	if !*noRemote && *writable {
+	if *writable && originClient != nil {
 		mgr, err := download.NewManager(defaultDownloadDir(st.Path()))
 		if err != nil {
 			return fmt.Errorf("serve: preparing downloads: %w", err)
 		}
-		// Depends on originClient existing, which holds: both are gated on
-		// !*noRemote. Credentials are selected per host so the Civitai key is
-		// never presented to HuggingFace or anywhere else.
+		// Credentials are selected per host so the Civitai key is never
+		// presented to HuggingFace, or to the upstream, or anywhere else.
 		mgr.TokenFor = originClient.TokenFor
 		downloads = mgr
 	}
@@ -147,9 +165,20 @@ disk should not be reachable from a shared LAN without one.`)
 	// a sweep running while somebody browses stays within one request budget
 	// between them -- two clients would each be politely paced and together
 	// double the rate, which is how a sweep earns the rate limit that stops it.
+	// One client means one throttle, so the sweeps that spend it have to take
+	// turns. Each registers immediately after it is constructed, and the
+	// adjacency is the point: a fourth sweep added here has a matching Add
+	// written directly beside every sibling's, rather than a coordination check
+	// somewhere else that somebody has to remember to extend.
+	jobs := &jobrun.Group{}
+
 	var enrichment *enrichjob.Manager
 	if !*noRemote && *writable {
 		enrichment = enrichjob.New(st, blobs, func() *origin.Client { return originClient })
+		jobs.Add("enrich", "enrichment", func() (string, bool) {
+			j, running := enrichment.InFlight()
+			return j.ID, running
+		})
 	}
 
 	// Update sweeps follow the same two rules and share the same client, for
@@ -158,6 +187,24 @@ disk should not be reachable from a shared LAN without one.`)
 	var updates *updatejob.Manager
 	if !*noRemote && *writable {
 		updates = updatejob.New(st, func() *origin.Client { return originClient })
+		jobs.Add("updates", "update check", func() (string, bool) {
+			j, running := updates.InFlight()
+			return j.ID, running
+		})
+	}
+
+	// Archive intake fetches from a provider and writes files, so it needs the
+	// same two conditions as the sweeps -- and one more of its own. --writable
+	// has meant "may add rows, and may create files you asked for"; intake also
+	// acts on a timer with nobody present, which is a different permission and
+	// is spelled as one.
+	var archives *archivejob.Manager
+	if !*noRemote && *writable && *allowArchive {
+		archives = archivejob.New(st, blobs, func() *origin.Client { return originClient })
+		jobs.Add("archive", "archive run", func() (string, bool) {
+			j, running := archives.InFlight()
+			return j.ID, running
+		})
 	}
 
 	// Rendering a thumbnail with ComfyUI creates a preview, so it follows the
@@ -171,18 +218,23 @@ disk should not be reachable from a shared LAN without one.`)
 	}
 
 	srv := api.New(api.Config{
-		Store:     st,
-		Blobs:     blobs,
-		UI:        embeddedUI(),
-		Security:  sec,
-		Version:   version,
-		ReadOnly:  !*writable,
-		Origin:    originClient,
-		Enrich:    enrichment,
-		Updates:   updates,
-		Scans:     scans,
-		Renders:   renders,
-		Downloads: downloads,
+		Store:        st,
+		Blobs:        blobs,
+		UI:           embeddedUI(),
+		Security:     sec,
+		Version:      version,
+		ReadOnly:     !*writable,
+		Origin:       originClient,
+		Enrich:       enrichment,
+		Updates:      updates,
+		Scans:        scans,
+		Renders:      renders,
+		Downloads:    downloads,
+		Jobs:         jobs,
+		Archives:     archives,
+		ServeFiles:   *serveFiles,
+		AllowEvict:   *allowEvict,
+		AllowArchive: *allowArchive,
 	})
 
 	listener, err := net.Listen("tcp", addr.String())
@@ -199,7 +251,24 @@ disk should not be reachable from a shared LAN without one.`)
 		IdleTimeout: 120 * time.Second,
 	}
 
-	printStartup(addr, sec, *writable, st.Path())
+	// The watchlist timer, and the only background work in this program that is
+	// not driven by a request. Started here, after the server exists, because it
+	// needs the same hooks the API layer owns: the shared-throttle group, and
+	// the download starter that puts a new version in the queue.
+	var scheduler *archivejob.Scheduler
+	if archives != nil && *archiveInterval > 0 {
+		archives.SetHooks(
+			func() (string, string, bool) { return jobs.Busy("archive") },
+			srv.ArchiveDownloadStarter(),
+		)
+		scheduler = archivejob.NewScheduler(archives, *archiveInterval)
+		// The ctx signalContext already produces, so Ctrl-C cancels this with no
+		// second shutdown path to get wrong.
+		go scheduler.Run(ctx)
+	}
+
+	printStartup(addr, sec, *writable, *serveFiles, *allowEvict, *allowArchive,
+		schedulerInterval(scheduler, *archiveInterval), st.Path())
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -215,11 +284,30 @@ disk should not be reachable from a shared LAN without one.`)
 		fmt.Fprintln(os.Stderr, "\nmm: shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return httpSrv.Shutdown(shutdownCtx)
+		err := httpSrv.Shutdown(shutdownCtx)
+		// Bounded by the same budget the server gets. A watchlist pass abandoned
+		// here loses nothing: every step records as it completes, so the next
+		// tick resumes from what is still incomplete.
+		if scheduler != nil {
+			select {
+			case <-scheduler.Stopped():
+			case <-shutdownCtx.Done():
+			}
+		}
+		return err
 	}
 }
 
-func printStartup(addr api.ListenAddr, sec api.Security, writable bool, dbPath string) {
+// schedulerInterval is the interval to announce, or zero when no timer runs.
+func schedulerInterval(s *archivejob.Scheduler, configured time.Duration) time.Duration {
+	if s == nil {
+		return 0
+	}
+	return configured
+}
+
+func printStartup(addr api.ListenAddr, sec api.Security, writable, serveFiles, allowEvict,
+	allowArchive bool, archiveEvery time.Duration, dbPath string) {
 	scheme := "http://"
 	display := addr.Host
 	if display == "" || display == "0.0.0.0" || display == "::" {
@@ -244,6 +332,26 @@ func printStartup(addr api.ListenAddr, sec api.Security, writable bool, dbPath s
 		fmt.Fprintln(os.Stderr, "  mode       writable")
 	} else {
 		fmt.Fprintln(os.Stderr, "  mode       read-only (start with --writable to enable editing)")
+	}
+	// Announced because it is the one setting that changes what leaves this
+	// machine. An operator who has forgotten they set it should be told at every
+	// start, not only when somebody downloads a checkpoint.
+	if serveFiles {
+		fmt.Fprintln(os.Stderr, "  files      served (other machines can download model files from this library)")
+	}
+	// Announced for the same reason: it is the only setting under which this
+	// daemon will remove a model file, and that is worth seeing at every start.
+	if allowEvict {
+		fmt.Fprintln(os.Stderr, "  evict      allowed (pulled copies may be deleted to reclaim space)")
+	}
+	// Announced for the same reason as the other two, and more so: this is the
+	// only setting under which the daemon contacts a provider on its own.
+	if allowArchive {
+		if archiveEvery > 0 {
+			fmt.Fprintf(os.Stderr, "  archive    allowed (watchlist checked every %s)\n", archiveEvery)
+		} else {
+			fmt.Fprintln(os.Stderr, "  archive    allowed (on request only; no timer)")
+		}
 	}
 	fmt.Fprintf(os.Stderr, "\n  UI    %s%s/\n", scheme, addr.String())
 	fmt.Fprintf(os.Stderr, "  API   %s%s/openapi.json\n\n", scheme, addr.String())

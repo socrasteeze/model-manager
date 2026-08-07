@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   acceptSuggestion,
+  archiveComplete,
   config,
   dismissSuggestion,
   enrichModel,
+  evictLocal,
   formatBytes,
   getCandidates,
   getModel,
@@ -12,6 +14,7 @@ import {
   type CandidateView,
   type EnrichResult,
   type ModelDetail,
+  type PulledCopy,
 } from '../api'
 import { CopyButton } from './CopyButton'
 import { EditableField } from './EditableField'
@@ -31,6 +34,8 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
   const [busy, setBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [refreshNote, setRefreshNote] = useState<string | null>(null)
+  const [evicting, setEvicting] = useState(false)
+  const [evictError, setEvictError] = useState<string | null>(null)
 
   const load = useCallback(() => {
     getModel(sha).then(setDetail).catch((e: Error) => setError(e.message))
@@ -42,8 +47,38 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
     setShowProvenance(false)
     setError(null)
     setRefreshNote(null)
+    setEvictError(null)
     load()
   }, [sha, load])
+
+  // Delete one local copy that was pulled from an upstream.
+  //
+  // Confirmed inline rather than silently, and the confirmation names the exact
+  // path and says what survives -- this is the only action in the app that
+  // removes a file, and the user should not have to guess how much of their
+  // work goes with it. (The answer is none: everything is keyed on the content
+  // hash, so the record, the tags, the previews and their own edits all stay.)
+  const evict = async (copy: PulledCopy) => {
+    const ok = window.confirm(
+      `Remove this copy from this machine?\n\n${copy.path}\n\n` +
+        `Frees ${formatBytes(copy.size_bytes)}. Everything the library knows about it — ` +
+        `name, tags, previews, provenance, your edits — is kept, and it stays listed as ` +
+        `available from ${copy.upstream}.`,
+    )
+    if (!ok) return
+    setEvicting(true)
+    setEvictError(null)
+    try {
+      const res = await evictLocal(sha, { path: copy.path, upstream: copy.upstream })
+      if (res.detail) setDetail(res.detail)
+      else load()
+      onChanged()
+    } catch (e) {
+      setEvictError((e as Error).message)
+    } finally {
+      setEvicting(false)
+    }
+  }
 
   // Ask the origin about this model and merge what comes back.
   //
@@ -297,18 +332,65 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
 
       <section className="files">
         <h3>Files</h3>
-        {detail.paths.map((p) => (
-          <div key={p.ID} className={`path${p.Present ? '' : ' absent'}`}>
-            <code>{p.Path}</code>
-            <div className="path-badges">
-              {!p.Present && <span className="badge absent-badge">not on disk</span>}
-              {p.Provisional && (
-                <span className="badge warn-badge" title="Bound by sampled probe; run mm verify --provisional to confirm">
-                  provisional
-                </span>
-              )}
+        {detail.paths.map((p) => {
+          // Evicting is offered per-path and only for the copy this daemon
+          // actually pulled: a tier-staged copy and an original can share the
+          // hash, and the server refuses to guess between them anyway.
+          const pulled = (detail.pulled ?? []).find(
+            (c) => !c.evicted_at && samePath(c.path, p.Path),
+          )
+          return (
+            <div key={p.ID} className={`path${p.Present ? '' : ' absent'}`}>
+              <code>{p.Path}</code>
+              <div className="path-badges">
+                {!p.Present && <span className="badge absent-badge">not on disk</span>}
+                {p.Provisional && (
+                  <span className="badge warn-badge" title="Bound by sampled probe; run mm verify --provisional to confirm">
+                    provisional
+                  </span>
+                )}
+                {config.evictAvailable && p.Present && !p.Provisional && pulled && (
+                  <button
+                    className="ghost"
+                    disabled={evicting}
+                    onClick={() => evict(pulled)}
+                    // Never "Delete". This removes a copy that can be fetched
+                    // again and keeps everything the library knows, and the
+                    // word has to carry that difference.
+                    title={`Remove this copy from this machine. It stays listed as available from ${pulled.upstream}.`}
+                  >
+                    {evicting ? 'Evicting…' : 'Evict local copy'}
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
+          )
+        })}
+        {(detail.pulled ?? []).length > 0 && (
+          <p className="source-note">
+            {(detail.pulled ?? []).some((c) => !c.evicted_at)
+              ? `Pulled from ${detail.pulled![0].upstream}.`
+              : `Not on this machine. Available from ${detail.pulled![0].upstream} — pull it again from the Browse tab.`}
+          </p>
+        )}
+        {evictError && <div className="error inline">{evictError}</div>}
+
+        {/* The state the archive exists for. Said plainly, because a model whose
+            upstream is gone is one where this copy is the record. */}
+        {(detail.archive ?? []).map((a) => (
+          <p key={`${a.provider}/${a.model_id}/${a.version_id}`} className="source-note">
+            {a.upstream_gone_at ? (
+              <strong>
+                Archived from {a.provider}, and no longer available there. This is the
+                surviving copy.
+              </strong>
+            ) : (
+              <>Archived from {a.provider} (model {a.model_id}, version {a.version_id}).</>
+            )}
+            {!archiveComplete(a) && (
+              <> Incomplete: {a.previews_got} of {a.previews_total} previews stored.</>
+            )}
+          </p>
         ))}
       </section>
 
@@ -444,6 +526,17 @@ function TagEditor({
 
 function short(hash: string): string {
   return `${hash.slice(0, 8)}…${hash.slice(-6)}`
+}
+
+// samePath matches a recorded path against a pulled copy's.
+//
+// Separator- and case-insensitive, because one of the two was written by the
+// scanner and the other by the downloader, and on Windows they can differ in
+// both. The server does the authoritative comparison; this only decides which
+// row gets the button.
+function samePath(a: string, b: string): boolean {
+  const norm = (s: string) => s.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  return norm(a) === norm(b)
 }
 
 // describeEnrich says what the refresh actually did.

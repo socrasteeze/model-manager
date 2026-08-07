@@ -84,12 +84,24 @@ func (s *Server) injectToken(html []byte) []byte {
 	// exactly how this flag would drift out of step with what the server
 	// actually enforces the next time that check grows a third one.
 	enrichStatus, _, _ := s.enrichPrereq()
+	archiveStatus, _, _ := s.archivePrereq()
 
 	config := map[string]any{
 		"token":           token,
 		"readOnly":        s.cfg.ReadOnly,
 		"version":         s.cfg.Version,
 		"enrichAvailable": enrichStatus == 0,
+		// Configuration, not reachability: whether the upstream is up is a
+		// question with a five-second answer, and blocking the page render on it
+		// would make a sleeping NAS look like a broken app. The UI asks
+		// /api/upstream for the rest.
+		"upstreamConfigured": s.cfg.Origin != nil && s.cfg.Origin.HasUpstream(),
+		// Both halves the evict handler itself checks, for the same reason the
+		// enrichment flag calls its own prerequisite rather than restating it.
+		"evictAvailable": s.cfg.AllowEvict && !s.cfg.ReadOnly,
+		// Calls the prerequisite rather than restating its conditions, so this
+		// cannot drift out of step with what the endpoint enforces.
+		"archiveAvailable": archiveStatus == 0,
 	}
 	encoded, err := json.Marshal(config)
 	if err != nil {

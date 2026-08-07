@@ -73,17 +73,22 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 
 	items, errs := registry.SearchAll(ctx, splitCSV(q["provider"]), query)
 
+	resp := browseResponse{Items: items, Providers: registry.IDs(), Errors: map[string]string{}}
+	for id, err := range errs {
+		resp.Errors[id] = err.Error()
+	}
+
 	// Without this, HuggingFace results carry no hashes and every one of them
 	// would render as "new" even when already owned. See Registry.ResolveFiles.
 	if q.Get("resolve") != "false" {
-		registry.ResolveFiles(ctx, items, limit)
-	}
-
-	resp := browseResponse{Items: items, Providers: registry.IDs()}
-	if len(errs) > 0 {
-		resp.Errors = map[string]string{}
-		for id, err := range errs {
-			resp.Errors[id] = err.Error()
+		for id, err := range registry.ResolveFiles(ctx, items, limit) {
+			// A provider whose search already failed keeps that error: it is the
+			// cause, and "file details could not be fetched" is the symptom.
+			if _, taken := resp.Errors[id]; taken {
+				continue
+			}
+			resp.Errors[id] = "file details could not be fetched, so ownership is " +
+				"unknown for some of these results: " + err.Error()
 		}
 	}
 	// An annotation failure must be visible, not silent: without the local
@@ -92,10 +97,12 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	if idx, err := origin.BuildLocalIndex(s.cfg.Store); err == nil {
 		idx.Annotate(items)
 	} else {
-		if resp.Errors == nil {
-			resp.Errors = map[string]string{}
-		}
 		resp.Errors["local"] = "could not read the library index; have/update status is missing: " + err.Error()
+	}
+	// Omitted when empty, so a clean search does not carry an empty object; the
+	// field is already `omitempty` and a non-nil empty map serializes as absent.
+	if len(resp.Errors) == 0 {
+		resp.Errors = nil
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -142,18 +149,25 @@ func (s *Server) handleRemoteImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid image url")
 		return
 	}
+	// Host-scoped, the same selection getJSON and the download manager already
+	// make. This proxy was the one outbound fetcher that sent no credential,
+	// which was invisible while every image host was a public CDN: an upstream
+	// daemon serves its previews from behind its own bearer token, so without
+	// this every thumbnail from the user's own library 401s and arrives here as
+	// a 502. Nil-checked above, at the top of the handler.
+	if token := s.cfg.Origin.TokenFor(target.String()); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
-	client := &http.Client{
-		Timeout: 20 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return errors.New("too many redirects")
-			}
-			if !s.imageHostAllowed(req.URL.Host) {
-				return fmt.Errorf("redirect to disallowed host %s", req.URL.Host)
-			}
-			return nil
-		},
+	client := s.outboundClient(20 * time.Second)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many redirects")
+		}
+		if !s.imageHostAllowed(req.URL.Host) {
+			return fmt.Errorf("redirect to disallowed host %s", req.URL.Host)
+		}
+		return nil
 	}
 
 	resp, err := client.Do(req)

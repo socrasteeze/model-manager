@@ -26,6 +26,15 @@ type UpdateStats struct {
 	Found   int
 	Errors  int
 
+	// Gone counts models the provider has stopped serving. Not an error -- the
+	// local copy is unaffected and is now the more valuable of the two -- but
+	// worth reporting, because it is the moment the archive earns its keep.
+	Gone int
+
+	// Recovered counts records pulled from the mirror after a takedown, which is
+	// metadata that would otherwise have existed nowhere.
+	Recovered int
+
 	// RateLimited means the provider cut the run short: the result covers only
 	// the models checked so far. Without this flag a truncated sweep is
 	// indistinguishable from "everything else is up to date", which is a wrong
@@ -38,6 +47,12 @@ type UpdateStats struct {
 // Summary renders the stats for the CLI.
 func (s *UpdateStats) Summary() string {
 	out := fmt.Sprintf("checked %d  updates %d", s.Checked, s.Found)
+	if s.Gone > 0 {
+		out += fmt.Sprintf("  gone upstream %d", s.Gone)
+	}
+	if s.Recovered > 0 {
+		out += fmt.Sprintf("  recovered from mirror %d", s.Recovered)
+	}
 	if s.Errors > 0 {
 		out += fmt.Sprintf("  errors %d", s.Errors)
 	}

@@ -29,6 +29,13 @@ func (c *Client) TokenFor(rawURL string) string {
 		return ""
 	}
 	switch {
+	case hostMatches(host, c.upstreamBase()):
+		// First on purpose. If MM_CIVITAI_API were ever pointed at the upstream
+		// host, a later case would hand the Civitai key to the NAS; ordering the
+		// upstream ahead of the public providers means the worst outcome of that
+		// misconfiguration is an unauthenticated Civitai request, not a working
+		// third-party credential disclosed onto the local network.
+		return c.UpstreamToken
 	case hostMatches(host, c.civitaiBase()):
 		return c.APIKey
 	case hostMatches(host, c.huggingFaceBase()), isHuggingFaceHost(host):
@@ -81,9 +88,15 @@ func siteBase(apiBase string) string {
 // Used by the daemon to decide which image hosts it is willing to proxy: a
 // mirror or a test server configured through MM_*_API should work without
 // being special-cased anywhere else.
+// The upstream is included, and that is the whole of the allowlist change needed
+// to make pulling work: the daemon's image proxy and its download host check are
+// the same function, so both widen together and cannot drift apart. The widening
+// is exactly one host, because callers compare these entries for equality while
+// the suffix match applies only to the static public-provider list -- so
+// hostOf's port is part of the match and a sibling subdomain is not.
 func (c *Client) ConfiguredHosts() []string {
 	var out []string
-	for _, base := range []string{c.civitaiBase(), c.huggingFaceBase(), c.civArchiveBase()} {
+	for _, base := range []string{c.civitaiBase(), c.huggingFaceBase(), c.civArchiveBase(), c.upstreamBase()} {
 		if h := hostOf(base); h != "" {
 			out = append(out, h)
 		}

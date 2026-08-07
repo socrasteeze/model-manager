@@ -84,6 +84,16 @@ func (s *Server) handleUploadPreview(w http.ResponseWriter, r *http.Request) {
 // storePreview puts the image (and its derived thumbnail and any embedded
 // ComfyUI workflow) in the blob store and attaches it to a model.
 func (s *Server) storePreview(sha string, data []byte, source string) (*store.PreviewImage, error) {
+	return s.storePreviewAt(sha, data, source, 0)
+}
+
+// storePreviewAt is storePreview with an explicit position.
+//
+// Split out for carrying previews over from an upstream, where the order the
+// images were in over there is part of what is being copied -- the first
+// preview is the one the card shows, and re-deriving that from arrival order
+// would silently reshuffle a set the user had arranged by hand.
+func (s *Server) storePreviewAt(sha string, data []byte, source string, position int) (*store.PreviewImage, error) {
 	blob, err := s.cfg.Blobs.Put(data)
 	if err != nil {
 		return nil, err
@@ -91,7 +101,7 @@ func (s *Server) storePreview(sha string, data []byte, source string) (*store.Pr
 
 	p := store.PreviewImage{
 		SHA256: sha, ImageSHA256: blob.SHA256, MIME: blob.MIME,
-		Bytes: blob.Bytes, Source: source,
+		Bytes: blob.Bytes, Source: source, Position: position,
 	}
 
 	// A derived thumbnail is what the grid actually loads. Failure here is not

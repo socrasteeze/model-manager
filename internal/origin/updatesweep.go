@@ -36,8 +36,68 @@ type SweepOptions struct {
 	// lately", not "ask everything again". Zero checks every model.
 	MaxAge time.Duration
 
+	// RecheckGone re-asks about models the provider has stopped serving.
+	//
+	// Off by default. A 404 only advances checked_at, and MaxAge defaults to
+	// zero, so without the exclusion a taken-down model is re-asked on every
+	// sweep forever -- on a library that has outlived a few takedowns, that
+	// becomes most of the sweep. Turning it on is how an operator asks whether
+	// any of them came back.
+	RecheckGone bool
+
 	Progress func(done, total int, stats UpdateStats)
 	Logf     func(format string, args ...any)
+}
+
+// recoverFromMirror archives the mirror's copy of a record the provider has
+// removed, and returns how many hashes it recovered.
+//
+// CivArchive mirrors Civitai records including ones Civitai has taken down, so a
+// 404 is exactly the moment it stops being redundant. The body is archived and
+// nothing is decoded from it: the archive property is keeping the bytes, and
+// deriving fields from an endpoint this project documents as unverified against
+// the live service would write guessed metadata under a trusted source name.
+//
+// Bounded two ways, so a self-trained library -- most of which 404s -- does not
+// spend a second request per model on every sweep. Only models something already
+// records an interest in reach here at all, and an existing cache entry, found
+// or missing, means the question has been asked once and will not be asked
+// again.
+func recoverFromMirror(ctx context.Context, st *store.Store, opts SweepOptions, modelID string) (int, error) {
+	cache := NewCache(st)
+	shas, err := st.SHAsForOriginModel(ProviderCivitaiID, modelID)
+	if err != nil || len(shas) == 0 {
+		return 0, err
+	}
+
+	recovered := 0
+	for _, sha := range shas {
+		if ctx.Err() != nil {
+			break
+		}
+		if _, asked, err := cache.Get(ProviderCivArchiveID, sha); err != nil {
+			return recovered, err
+		} else if asked {
+			continue
+		}
+		raw, status, err := opts.Client.LookupCivArchiveByHash(ctx, sha)
+		if err != nil {
+			return recovered, err
+		}
+		if raw == nil {
+			// The mirror does not have it either. Recorded so the question is
+			// not re-asked every sweep for a record nobody has.
+			if err := cache.PutMissing(ProviderCivArchiveID, sha, status); err != nil {
+				return recovered, err
+			}
+			continue
+		}
+		if err := cache.PutFound(ProviderCivArchiveID, sha, raw, status); err != nil {
+			return recovered, err
+		}
+		recovered++
+	}
+	return recovered, nil
 }
 
 // SweepUpdates asks each owned model what its newest version is, and records
@@ -68,7 +128,7 @@ func SweepUpdates(ctx context.Context, st *store.Store, opts SweepOptions) (*Upd
 		logf("recorded origin identity for %d model(s)", n)
 	}
 
-	owned, err := st.OwnedOriginModels(ProviderCivitaiID, opts.MaxAge, opts.Limit)
+	owned, err := st.OwnedOriginModels(ProviderCivitaiID, opts.MaxAge, opts.Limit, opts.RecheckGone)
 	if err != nil {
 		return nil, err
 	}
@@ -112,9 +172,29 @@ func SweepUpdates(ctx context.Context, st *store.Store, opts SweepOptions) (*Upd
 			// A 404 means the model was removed upstream. Not an error, and not
 			// a reason to clear what was already known: a newer version may
 			// still have been published, and may still be reachable elsewhere.
+			//
+			// Recorded as gone as well as checked. Without the stamp the model
+			// returns to this queue on every subsequent sweep -- checked_at
+			// advances but nothing reads it when MaxAge is zero, which is the
+			// default -- so a library that has outlived a few takedowns spends
+			// most of each sweep re-confirming absences.
 			if markErr := st.MarkOriginModelChecked(
 				ProviderCivitaiID, m.ModelID, 404, ""); markErr != nil {
 				logf("model %s: recording the miss: %v", m.ModelID, markErr)
+			}
+			if markErr := st.MarkOriginModelGone(ProviderCivitaiID, m.ModelID); markErr != nil {
+				logf("model %s: recording the takedown: %v", m.ModelID, markErr)
+			}
+			stats.Gone++
+
+			// A 404 is the moment the mirror stops being redundant and becomes
+			// the only surviving copy of this record. Asked here rather than on
+			// a later pass because the model id is still in hand, and because a
+			// takedown does not get easier to recover from with time.
+			if n, err := recoverFromMirror(ctx, st, opts, m.ModelID); err != nil {
+				logf("model %s: mirror lookup: %v", m.ModelID, err)
+			} else if n > 0 {
+				stats.Recovered += n
 			}
 			continue
 		}

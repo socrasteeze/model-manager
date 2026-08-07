@@ -960,6 +960,99 @@ a.ghost {
   font-size: 0.9rem;
 }
 
+/* Upstream library status.
+   A definition list rather than a sentence, because the four facts fail
+   independently and each has its own fix -- reading them as a row is the
+   point. */
+.upstream-status {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.6rem 1.2rem;
+  margin: 0 0 0.8rem;
+}
+
+.upstream-status div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.upstream-status dt {
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.upstream-status dd {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.upstream-env {
+  margin: 0.4rem 0 0.6rem;
+  padding-left: 1.1rem;
+  line-height: 1.7;
+}
+
+.muted { color: var(--text-dim); }
+
+/* Archive inventory. A table because the four completeness columns are the
+   point: "partial" is not actionable, which part is missing is. */
+.archive-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin: 0.6rem 0;
+}
+
+.archive-table th {
+  text-align: left;
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.3rem 0.5rem 0.3rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.archive-table td {
+  padding: 0.45rem 0.5rem 0.45rem 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.archive-table .hint { margin: 0.2rem 0 0; }
+
+.watch-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+}
+
+.watch-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.watch-list .setting-row { margin: 0; flex: 1 1 auto; }
+
+/* A button that reads as a link: the action is navigation within the app, so
+   it should not look like the destructive and creative buttons around it. */
+.linklike {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 .root-add {
   display: flex;
   gap: 0.5rem;

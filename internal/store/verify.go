@@ -187,6 +187,43 @@ func (s *Store) PathsFor(sha string) ([]FilePath, error) {
 	return out, rows.Err()
 }
 
+// ConfirmedPresentPath returns one present, non-provisional path for a model,
+// along with the size recorded against its content hash.
+//
+// Provisional paths are excluded per §10.1: a probe-bound path is not proven to
+// hold these bytes. Staging cares because it copies a file and then presents the
+// copy as that model; serving cares because the client verifies the stream
+// against the hash it asked for, so a probe's guess would surface as a checksum
+// failure at the far end of a multi-gigabyte transfer.
+//
+// The size comes from model_file rather than the path row because it is the size
+// of the *content*, which is what a hash-addressed reader is entitled to expect;
+// the path row's size is what some earlier stat saw.
+//
+// Shared by the tier manager and the file endpoint deliberately. Two spellings
+// of "a path I am willing to act on" would eventually disagree about
+// provisional rows, and the one that got it wrong would be the one nobody was
+// looking at.
+func (s *Store) ConfirmedPresentPath(sha string) (FilePath, int64, error) {
+	var p FilePath
+	var device, inode int64
+	var contentSize int64
+	err := s.db.QueryRow(`
+        SELECT p.id, p.sha256, p.path, p.root, p.device, p.inode,
+               p.size, p.mtime_ns, f.size
+          FROM model_file_path p JOIN model_file f ON f.sha256 = p.sha256
+         WHERE p.sha256 = ? AND p.present = 1 AND p.provisional = 0
+         ORDER BY p.id LIMIT 1`, sha).Scan(
+		&p.ID, &p.SHA256, &p.Path, &p.Root, &device, &inode,
+		&p.Size, &p.MtimeNs, &contentSize)
+	if err != nil {
+		return FilePath{}, 0, fmt.Errorf("store: no confirmed on-disk copy of %s", sha)
+	}
+	p.Device, p.Inode = uint64(device), uint64(inode)
+	p.Present = true
+	return p, contentSize, nil
+}
+
 // ScanRunSummary is one recorded scan.
 type ScanRunSummary struct {
 	ID          int64  `json:"scan_run_id"`

@@ -16,6 +16,9 @@ import (
 	"testing/fstest"
 
 	"github.com/socrasteeze/model-manager/internal/blobstore"
+	"github.com/socrasteeze/model-manager/internal/diskspace"
+	"github.com/socrasteeze/model-manager/internal/download"
+	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/store"
 	"github.com/socrasteeze/model-manager/internal/testutil"
 )
@@ -51,6 +54,98 @@ func serverWithRoot(t *testing.T, root string, mutate func(*Config)) *Server {
 		mutate(&cfg)
 	}
 	return New(cfg)
+}
+
+// downloadServer is serverWithRoot plus a real download manager, so the
+// preflight has a work directory to measure.
+func downloadServer(t *testing.T, root string, free func(dir string) (int64, error)) *Server {
+	t.Helper()
+	return serverWithRoot(t, root, func(c *Config) {
+		mgr, err := download.NewManager(filepath.Join(testutil.TempDir(t), "partials"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Downloads = mgr
+		c.Origin = &origin.Client{}
+		c.FreeSpace = free
+	})
+}
+
+func startDownloadOfSize(t *testing.T, s *Server, root string, size int64) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{
+		"url":       "https://civitai.com/api/download/models/1",
+		"dest_root": root,
+		"filename":  "big.safetensors",
+		"size":      size,
+	})
+	return do(s, "POST", "http://localhost/api/downloads", string(body), nil)
+}
+
+// A transfer that cannot possibly fit must fail in the first second, not in the
+// fortieth minute with a full disk and an orphaned partial.
+func TestDownloadRefusedWhenTheDestinationIsFull(t *testing.T) {
+	root := testutil.TempDir(t)
+	s := downloadServer(t, root, func(string) (int64, error) { return 1 << 20, nil })
+
+	w := startDownloadOfSize(t, s, root, 40<<30)
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("status = %d, want 507", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "free") {
+		t.Errorf("the refusal should say how much is free: %s", w.Body.String())
+	}
+}
+
+// The check that the obvious implementation misses. The transfer stages the
+// whole file beside the database and only then publishes it -- and across a
+// filesystem boundary, publishing copies, so the bytes exist in both places at
+// once. Checking only the destination accepts a transfer that fills the system
+// disk instead.
+func TestSpacePreflightChecksBothFilesystems(t *testing.T) {
+	root := testutil.TempDir(t)
+	var asked []string
+	s := downloadServer(t, root, func(dir string) (int64, error) {
+		asked = append(asked, dir)
+		// The destination has room; the staging directory does not.
+		if strings.HasPrefix(dir, root) {
+			return 1 << 40, nil
+		}
+		return 1 << 20, nil
+	})
+
+	w := startDownloadOfSize(t, s, root, 40<<30)
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("status = %d, want 507 when only the staging filesystem is full", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "staging") {
+		t.Errorf("the refusal should name the filesystem that is short: %s", w.Body.String())
+	}
+	if len(asked) == 0 {
+		t.Fatal("nothing was measured")
+	}
+}
+
+// A courtesy that refuses downloads when it cannot do its job is worse than no
+// courtesy: the real disk-full condition is still caught during the transfer,
+// which is where it was caught before the preflight existed.
+func TestSpacePreflightProceedsWhenItCannotMeasure(t *testing.T) {
+	root := testutil.TempDir(t)
+	s := downloadServer(t, root, func(string) (int64, error) {
+		return 0, diskspace.ErrUnsupported
+	})
+
+	// Accepted as far as the host allowlist, which is the next gate -- the point
+	// is only that the preflight did not refuse it.
+	if w := startDownloadOfSize(t, s, root, 40<<30); w.Code == http.StatusInsufficientStorage {
+		t.Fatalf("an unmeasurable filesystem produced a 507: %s", w.Body.String())
+	}
+
+	// And an unknown size cannot be checked at all, so it must not be refused.
+	s2 := downloadServer(t, root, func(string) (int64, error) { return 0, nil })
+	if w := startDownloadOfSize(t, s2, root, 0); w.Code == http.StatusInsufficientStorage {
+		t.Fatalf("a download of unknown size produced a 507: %s", w.Body.String())
+	}
 }
 
 func TestResolveDestinationAcceptsScannedRoot(t *testing.T) {

@@ -373,21 +373,13 @@ func (p *CivitaiProvider) Files(ctx context.Context, l Listing) ([]RemoteFile, e
 //
 // Used by update checking: given a model id recorded when a file was enriched,
 // this is what the local copy is compared against.
+// Two lines over FetchCivitaiModel rather than a second copy of the same
+// request and decode: archive intake needs the raw body this one discards, and
+// leaving both to fetch and parse /models/{id} independently is how they drift.
 func (c *Client) LatestVersion(ctx context.Context, modelID string) (*Listing, error) {
-	raw, _, err := c.getJSON(ctx, c.civitaiBase()+"/models/"+url.PathEscape(modelID))
-	if err != nil {
+	_, listings, _, err := c.FetchCivitaiModel(ctx, modelID)
+	if err != nil || len(listings) == 0 {
 		return nil, err
-	}
-	if raw == nil {
-		return nil, nil
-	}
-	var m civitaiSearchModel
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("civitai: decoding model %s: %w", modelID, err)
-	}
-	listings := civitaiListings(m)
-	if len(listings) == 0 {
-		return nil, nil
 	}
 	// The API returns versions newest-first; do not re-sort by date, because
 	// publishedAt is null for drafts and would sort them to the wrong end.

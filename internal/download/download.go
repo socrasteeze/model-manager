@@ -116,9 +116,54 @@ type Job struct {
 	// verified and in place, the library just does not show it yet.
 	IndexError string `json:"index_error,omitempty"`
 
+	// Validator is the strong validator the first response carried, replayed as
+	// If-Range on a resume so the server can say "that is stale" instead of
+	// appending a different representation onto the bytes already on disk.
+	//
+	// Not serialized: a transport detail with nothing to show a user, and some
+	// ETag schemes embed a backend identifier that has no business in a status
+	// poll. Not persisted either -- a partial survives a daemon restart, since
+	// the job id is a hash of URL and filename, but the in-memory job does not.
+	// The first attempt after a restart therefore falls back to a bare Range,
+	// byte-for-byte the behaviour before this existed; every attempt after the
+	// first within one transfer is covered, which is the case a dropped
+	// connection produces.
+	Validator string `json:"-"`
+
+	// ArchiveKey names the archive entry this transfer belongs to, empty for an
+	// ordinary download. Set by the API layer from its own request, the way
+	// DestRoot and UpstreamBase are, so nothing downstream re-derives what kind
+	// of transfer this was by re-parsing a URL.
+	ArchiveKey string `json:"archive_key,omitempty"`
+
+	// UpstreamBase names the model-manager this file was pulled from, empty for
+	// an ordinary download from a public provider.
+	//
+	// Set by the API layer from its own allowlist match, exactly the way
+	// DestRoot is, so nothing downstream has to re-parse the URL to work out
+	// what kind of transfer this was. It is what tells the completion hook there
+	// is metadata worth carrying over, and it is what makes this copy evictable
+	// later: a file is only safe to delete if something recorded where to get it
+	// again.
+	UpstreamBase string `json:"upstream_base,omitempty"`
+
+	// MetaError records a failure to carry metadata over from an upstream. The
+	// file is verified, in place and indexed -- only the name, tags and previews
+	// are thinner than the source held. Kept apart from IndexError because the
+	// two need different words: one means the model is not in the library, the
+	// other means it is.
+	MetaError string `json:"meta_error,omitempty"`
+
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`
 }
+
+// InFlight reports whether this job may still be writing bytes.
+//
+// Exported so callers do not re-enumerate the live states. There are three, and
+// a caller that listed them itself would keep its own copy of a set this package
+// owns -- which is how the two drift the next time a state is added.
+func (j Job) InFlight() bool { return !terminal(j.State) }
 
 // Progress reports transfer state.
 func (j *Job) Progress() float64 {
@@ -151,6 +196,20 @@ type Manager struct {
 	// IndexError. This is how the daemon indexes a finished file without the
 	// download package importing the store.
 	OnComplete func(Job) string
+
+	// AfterComplete, when set, runs after OnComplete and only when OnComplete
+	// reported no error. A non-empty return is recorded as the job's MetaError.
+	//
+	// A second hook rather than more work inside the first, because their
+	// failures are not the same failure. OnComplete's error means the file is
+	// not in the library and a rescan is needed; this one's means the file is in
+	// the library with less metadata than the source had. Reporting the second
+	// through the first would tell the user to rescan for something a rescan
+	// cannot fix.
+	//
+	// Skipped entirely when OnComplete failed: there is no local record to hang
+	// carried-over metadata on yet.
+	AfterComplete func(Job) string
 
 	// MaxRetries bounds resume attempts for one job.
 	MaxRetries int
@@ -396,15 +455,65 @@ func (m *Manager) run(ctx context.Context, job Job) (Job, error) {
 		j.FinishedAt = time.Now()
 	})
 
+	indexed := true
 	if m.OnComplete != nil {
 		final, _ := m.Job(job.ID)
 		if msg := m.OnComplete(final); msg != "" {
 			m.update(job.ID, func(j *Job) { j.IndexError = msg })
+			indexed = false
+		}
+	}
+
+	if m.AfterComplete != nil && indexed {
+		final, _ := m.Job(job.ID)
+		if msg := m.AfterComplete(final); msg != "" {
+			m.update(job.ID, func(j *Job) { j.MetaError = msg })
 		}
 	}
 
 	final, _ := m.Job(job.ID)
 	return final, nil
+}
+
+// ifRange returns the value to send as If-Range on a resume, or "".
+func (m *Manager) ifRange(id string) string {
+	j, ok := m.Job(id)
+	if !ok {
+		return ""
+	}
+	if j.Validator != "" {
+		return j.Validator
+	}
+	// The one case where a validator is knowable without having seen a response:
+	// another model-manager's file endpoint sets its ETag to the content hash,
+	// which is this transfer's own expected hash. That makes this the fallback
+	// for the single gap the captured value cannot cover -- the first attempt
+	// after a daemon restart, resuming a partial the process has never seen a
+	// response for.
+	//
+	// Restricted to an upstream deliberately. A public provider's ETag is a CDN
+	// entity tag that will never equal our sha256, so sending it there would
+	// guarantee a mismatch, a 200 with the whole body, and a truncated partial --
+	// destroying resume for exactly the multi-gigabyte transfers resume exists
+	// for. An invented validator is worse than none.
+	if j.UpstreamBase != "" && j.ExpectedSHA256 != "" {
+		return `"` + strings.ToLower(j.ExpectedSHA256) + `"`
+	}
+	return ""
+}
+
+// strongValidator picks a value usable in If-Range, or "".
+//
+// A weak ETag (W/"...") is skipped rather than sent: RFC 7233 forbids one here,
+// because weak comparison establishes that two representations are equivalent,
+// not that they are byte-identical -- and byte-identity is the only thing that
+// makes appending to a partial safe. Last-Modified is the fallback the RFC
+// provides for servers that offer no strong tag.
+func strongValidator(resp *http.Response) string {
+	if et := strings.TrimSpace(resp.Header.Get("ETag")); et != "" && !strings.HasPrefix(et, "W/") {
+		return et
+	}
+	return strings.TrimSpace(resp.Header.Get("Last-Modified"))
 }
 
 // reject quarantines a partial whose content failed verification.
@@ -463,6 +572,14 @@ func (m *Manager) transfer(ctx context.Context, id, url, partial string) error {
 		}
 		if existing > 0 {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existing))
+			// If-Range turns "give me the rest" into "give me the rest, but only
+			// if it is still the same file". Without it, a source that changed
+			// between attempts answers 206 and the tail of a new representation
+			// is appended to the head of an old one -- a file that is wrong in a
+			// way only the final hash check catches, after the whole transfer.
+			if v := m.ifRange(id); v != "" {
+				req.Header.Set("If-Range", v)
+			}
 		}
 
 		resp, err := m.HTTP.Do(req)
@@ -486,6 +603,13 @@ func (m *Manager) transfer(ctx context.Context, id, url, partial string) error {
 		case resp.StatusCode == http.StatusOK:
 			// The server ignored the range and is sending the whole file. Start
 			// over rather than appending a second copy onto the first.
+			//
+			// Under If-Range this is also the "the file changed" answer, and
+			// starting over is equally correct for it: the bytes on disk belong
+			// to a representation that no longer exists. Both readings land
+			// here, so no branch is needed to tell them apart -- but a reader who
+			// only knows the first would think this case is about servers that
+			// do not do ranges.
 			existing = 0
 		case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
 			// "Content-Range: bytes */<total>" carries the real size. Only a
@@ -524,12 +648,20 @@ func (m *Manager) transfer(ctx context.Context, id, url, partial string) error {
 		if appending && total > 0 {
 			total += existing
 		}
+		validator := strongValidator(resp)
 		m.update(id, func(j *Job) {
 			if total > 0 {
 				j.Total = total
 			}
 			j.Downloaded = existing
 			j.State = StateDownloading
+			// Captured on both the 206 and the 200 path, since either can be the
+			// first response of a transfer. Only overwritten when the server
+			// offered one, so a server that stops sending validators does not
+			// erase the one we are already resuming against.
+			if validator != "" {
+				j.Validator = validator
+			}
 		})
 
 		flags := os.O_CREATE | os.O_WRONLY

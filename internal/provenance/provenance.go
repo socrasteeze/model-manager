@@ -46,12 +46,38 @@ const (
 	SourceSwarmUI           = "swarmui"
 	SourceA1111             = "a1111"
 	SourcePathHeuristic     = "path_heuristic"
+
+	// SourceCivArchive is a mirror of Civitai records, including ones Civitai
+	// has removed. Origin tier, because it is the same published data seen
+	// through a mirror -- but ranked below Civitai within the tier: where both
+	// answer, the live service is the more current of the two, and a mirror can
+	// be stale by an unbounded amount.
+	//
+	// Registered even though nothing derives observations from it yet. Without
+	// an entry an unknown source falls to TierTool at trust 1, which would put
+	// mirrored provider metadata below a guess made from a folder name.
+	SourceCivArchive = "civarchive"
+
+	// SourceUpstream scopes what was copied from another model-manager.
+	//
+	// Used for tags and previews, which are unions rather than contests and
+	// only need a key saying who contributed them. Field values pulled from an
+	// upstream are deliberately NOT recorded under this name: they are replayed
+	// under the source that originally produced them, so a value the user typed
+	// on the NAS arrives here as manual and stays untouchable, instead of being
+	// flattened into one source that a later local enrich could outrank.
+	//
+	// Deliberately absent from the tiers and trust maps below. If it ever does
+	// reach field_value, the unknown-source defaults apply -- TierTool, trust 1
+	// -- which is the direction a mistake should fall.
+	SourceUpstream = "upstream"
 )
 
 // tiers maps each source to its precedence class.
 var tiers = map[string]Tier{
 	SourceManual:            TierManual,
 	SourceCivitai:           TierOrigin,
+	SourceCivArchive:        TierOrigin,
 	SourceHuggingFace:       TierOrigin,
 	SourceSafetensorsHeader: TierTool,
 	SourceGGUFHeader:        TierTool,
@@ -77,6 +103,7 @@ var tiers = map[string]Tier{
 var trust = map[string]int{
 	SourceManual:            100,
 	SourceCivitai:           90,
+	SourceCivArchive:        85,
 	SourceHuggingFace:       80,
 	SourceSafetensorsHeader: 60,
 	SourceGGUFHeader:        60,

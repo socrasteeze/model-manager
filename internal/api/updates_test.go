@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/socrasteeze/model-manager/internal/enrichjob"
+	"github.com/socrasteeze/model-manager/internal/jobrun"
 	"github.com/socrasteeze/model-manager/internal/origin"
 	"github.com/socrasteeze/model-manager/internal/store"
 	"github.com/socrasteeze/model-manager/internal/updatejob"
@@ -150,37 +151,74 @@ func TestUpdateSweepRefusedWhenReadOnly(t *testing.T) {
 }
 
 // Both sweeps spend one shared throttle, and jobrun only enforces at-most-one
-// within a Runner -- so the API layer has to keep them from overlapping.
-func TestUpdateSweepRefusedWhileEnrichmentIsRunning(t *testing.T) {
-	st := testStore(t)
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(400 * time.Millisecond)
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	t.Cleanup(slow.Close)
+// within a Runner -- so something has to keep them from overlapping.
+//
+// Asserted in both directions. It used to hold in only one: the update sweep
+// asked whether enrichment was running and enrichment did not ask about updates,
+// so starting them in that order put two politely-paced sweeps on one rate
+// limit. The group makes the exclusion symmetric by construction; this pins it.
+func TestSweepsRefuseToOverlapInEitherDirection(t *testing.T) {
+	build := func(t *testing.T) (*Server, *enrichjob.Manager, *updatejob.Manager) {
+		t.Helper()
+		st := testStore(t)
+		slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(400 * time.Millisecond)
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		t.Cleanup(slow.Close)
 
-	client := origin.NewClient()
-	client.MinInterval = 0
-	client.CivitaiBase = slow.URL
-	client.APIKey, client.HFToken = "", ""
-	client.MaxRetries = 1
+		client := origin.NewClient()
+		client.MinInterval = 0
+		client.CivitaiBase = slow.URL
+		client.APIKey, client.HFToken = "", ""
+		client.MaxRetries = 1
 
-	enrich := enrichjob.New(st, nil, func() *origin.Client { return client })
-	s := New(Config{
-		Store: st, Version: "test", Security: Security{},
-		Origin: client, Enrich: enrich,
-		Updates: updatejob.New(st, func() *origin.Client { return client }),
+		enrich := enrichjob.New(st, nil, func() *origin.Client { return client })
+		updates := updatejob.New(st, func() *origin.Client { return client })
+
+		// The same registration serve.go performs, beside each manager.
+		jobs := &jobrun.Group{}
+		jobs.Add("enrich", "enrichment", func() (string, bool) {
+			j, running := enrich.InFlight()
+			return j.ID, running
+		})
+		jobs.Add("updates", "update check", func() (string, bool) {
+			j, running := updates.InFlight()
+			return j.ID, running
+		})
+
+		s := New(Config{
+			Store: st, Version: "test", Security: Security{},
+			Origin: client, Enrich: enrich, Updates: updates, Jobs: jobs,
+		})
+		return s, enrich, updates
+	}
+
+	t.Run("updates refused while enrichment runs", func(t *testing.T) {
+		s, enrich, _ := build(t)
+		if _, err := enrich.Start("all", enrichjob.Options{SkipImages: true}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { enrich.Cancel("") })
+
+		w := do(s, "POST", "http://127.0.0.1/api/updates", "", nil)
+		if w.Code != http.StatusConflict {
+			t.Errorf("status %d while enrichment runs, want 409: %s", w.Code, w.Body.String())
+		}
 	})
 
-	if _, err := enrich.Start("all", enrichjob.Options{SkipImages: true}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { enrich.Cancel("") })
+	t.Run("enrichment refused while updates run", func(t *testing.T) {
+		s, _, updates := build(t)
+		if _, err := updates.Start(updatejob.Options{}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { updates.Cancel("") })
 
-	w := do(s, "POST", "http://127.0.0.1/api/updates", "", nil)
-	if w.Code != http.StatusConflict {
-		t.Errorf("status %d while an enrichment sweep is running, want 409: %s", w.Code, w.Body.String())
-	}
+		w := do(s, "POST", "http://127.0.0.1/api/enrich", "", nil)
+		if w.Code != http.StatusConflict {
+			t.Errorf("status %d while an update sweep runs, want 409: %s", w.Code, w.Body.String())
+		}
+	})
 }
 
 func TestUpdateSweepRefusesASecondConcurrentRun(t *testing.T) {

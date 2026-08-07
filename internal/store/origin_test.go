@@ -172,7 +172,7 @@ func TestFailedCheckDoesNotClearAKnownLatest(t *testing.T) {
 		t.Fatalf("a failed check retracted the known latest: %+v", ups)
 	}
 	// ...but it did record that we asked, so the sweep can move on.
-	owned, err := s.OwnedOriginModels("civitai", 0, 0)
+	owned, err := s.OwnedOriginModels("civitai", 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestOwnedOriginModelsOrdersLeastRecentlyCheckedFirst(t *testing.T) {
 	// Model 2 was checked; 1 and 3 never were.
 	seedUpstream(t, s, "2", "21", "")
 
-	owned, err := s.OwnedOriginModels("civitai", 0, 0)
+	owned, err := s.OwnedOriginModels("civitai", 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestOwnedOriginModelsOrdersLeastRecentlyCheckedFirst(t *testing.T) {
 	}
 
 	// maxAge skips the one just checked.
-	fresh, err := s.OwnedOriginModels("civitai", time.Hour, 0)
+	fresh, err := s.OwnedOriginModels("civitai", time.Hour, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}

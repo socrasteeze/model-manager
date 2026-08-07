@@ -19,15 +19,19 @@ import {
   type DownloadJob,
   type Listing,
   type RemoteFile,
+  archivePull,
   MODEL_TYPES,
+  PROVIDER_UPSTREAM,
+  upstreamStatus,
   type Update,
   type GroupingMode,
+  type UpstreamStatus,
 } from '../api'
 import { groupListings, type ListingGroup } from '../grouping'
 import { CopyButton } from './CopyButton'
 import { DestinationHint } from './DestinationHint'
 
-const PROVIDERS = [
+const PUBLIC_PROVIDERS = [
   { id: 'civitai', label: 'Civitai' },
   { id: 'civarchive', label: 'CivArchive' },
   { id: 'huggingface', label: 'HuggingFace' },
@@ -37,6 +41,26 @@ const PROVIDERS = [
 // list here, and this same string decided a directory name -- so a type the
 // server did not recognise became a folder named after it.
 const TYPES = MODEL_TYPES
+
+/**
+ * Pick a sort that the selected sources can actually express.
+ *
+ * The default is by download count, which a private library has none of, so a
+ * merged page sorts every upstream result to the bottom behind every Civitai
+ * one. Fixed here rather than in the merge: making the sort lie about an
+ * upstream (by treating "no downloads" as a number to rank on) would be worse
+ * than choosing an order the source can answer.
+ *
+ * Only applied when the upstream is the *only* selected source. In a mixed
+ * search the public providers' ordering is the more useful one and the upstream
+ * results are a minority to scan for.
+ */
+function sortFor(providers: string[]): { sort?: string } {
+  const onlyUpstream = providers.length === 1 && providers[0] === PROVIDER_UPSTREAM
+  if (onlyUpstream) return { sort: 'newest' }
+  if (providers.includes(PROVIDER_UPSTREAM)) return {}
+  return { sort: emptyBrowseQuery.sort }
+}
 
 interface Props {
   hidden?: boolean
@@ -66,6 +90,7 @@ export function BrowsePanel({ hidden, includeNSFW, grouping }: Props) {
   const [roots, setRoots] = useState<string[]>([])
   const [destRoot, setDestRoot] = useState('')
   const [jobs, setJobs] = useState<DownloadJob[]>([])
+  const [upstream, setUpstream] = useState<UpstreamStatus | null>(null)
 
   // Downloading needs a writable server and at least one scanned root to put
   // things in; without both the UI offers the command to run instead.
@@ -79,6 +104,23 @@ export function BrowsePanel({ hidden, includeNSFW, grouping }: Props) {
       })
       .catch(() => setRoots([]))
   }, [])
+
+  // Only asked for when the daemon says one is configured, so the ordinary
+  // install never pays for a probe that can only answer "no upstream".
+  useEffect(() => {
+    if (!config.upstreamConfigured) return
+    upstreamStatus()
+      .then(setUpstream)
+      .catch(() => setUpstream(null))
+  }, [])
+
+  const providers = useMemo(
+    () =>
+      upstream?.configured
+        ? [...PUBLIC_PROVIDERS, { id: PROVIDER_UPSTREAM, label: upstream.name || 'My library' }]
+        : PUBLIC_PROVIDERS,
+    [upstream],
+  )
 
   // Poll only while something is in flight. A finished queue must not keep the
   // daemon busy answering for a tab nobody is looking at.
@@ -208,11 +250,12 @@ export function BrowsePanel({ hidden, includeNSFW, grouping }: Props) {
   // Functional updates: two quick clicks in one React batch must not build
   // the second state from the first's stale snapshot.
   const toggle = (key: 'providers' | 'type', value: string) => {
-    setQuery((q) => ({
-      ...q,
-      [key]: q[key].includes(value) ? q[key].filter((v) => v !== value) : [...q[key], value],
-      page: 1,
-    }))
+    setQuery((q) => {
+      const next = q[key].includes(value)
+        ? q[key].filter((v) => v !== value)
+        : [...q[key], value]
+      return { ...q, [key]: next, page: 1, ...(key === 'providers' ? sortFor(next) : {}) }
+    })
   }
 
   return (
@@ -237,7 +280,7 @@ export function BrowsePanel({ hidden, includeNSFW, grouping }: Props) {
 
       <div className="browse-filters">
         <div className="chip-row">
-          {PROVIDERS.map((p) => (
+          {providers.map((p) => (
             <button
               key={p.id}
               className={`chip${query.providers.includes(p.id) ? ' on' : ''}`}
@@ -332,6 +375,7 @@ export function BrowsePanel({ hidden, includeNSFW, grouping }: Props) {
             canDownload={canDownload}
             jobs={jobs}
             jobIdByUrl={jobIdByUrl}
+            upstream={upstream}
             onStarted={(id, url) => {
               if (id && url) setJobIdByUrl((m) => ({ ...m, [url]: id }))
               listDownloads().then(setJobs).catch(() => {})
@@ -369,6 +413,7 @@ function ListingCard({
   jobs,
   jobIdByUrl,
   onStarted,
+  upstream,
 }: {
   group: ListingGroup
   destRoot: string
@@ -376,6 +421,7 @@ function ListingCard({
   jobs: DownloadJob[]
   jobIdByUrl: Record<string, string>
   onStarted: (id?: string, url?: string) => void
+  upstream: UpstreamStatus | null
 }) {
   // Which version this card is showing. Starts at the group's primary -- the
   // one you already own, if any -- and resets when the group changes underneath
@@ -391,7 +437,21 @@ function ListingCard({
   const status = group.status
   const file = pickFile(listing.files)
   const [busy, setBusy] = useState(false)
+  const [archiving, setArchiving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+
+  const isUpstream = listing.provider === PROVIDER_UPSTREAM
+  // Owned but not on this disk -- evicted to reclaim space, or on a drive that
+  // is not mounted. Either way the card must offer it back: "have" next to a
+  // file that is gone leaves the user with nowhere to go. `undefined` means an
+  // older daemon that never reported residency, so it is treated as resident
+  // and the card behaves exactly as it did before.
+  const notResident = status === 'have' && group.primary.local?.resident === false
+  const offerFetch = status !== 'have' || notResident
+  const fetchLabel = isUpstream ? 'Pull' : 'Download'
+  // An upstream that will not serve files can still be browsed; it just cannot
+  // be fetched from, and saying so beats a button that 404s.
+  const upstreamRefusesFiles = isUpstream && upstream?.files === 'no'
 
   // Resolved from the selected version, so switching versions does not show
   // another version's download progress on this card.
@@ -492,9 +552,18 @@ function ListingCard({
           children, and this row needs the card's full width to fit its three
           buttons on one line. */}
       <div className="listing-actions">
-          {file?.download_url && status !== 'have' && canDownload && !job && (
-            <button className="primary" disabled={busy} onClick={start}>
-              {busy ? 'Starting…' : 'Download'}
+          {file?.download_url && offerFetch && canDownload && !job && (
+            <button
+              className="primary"
+              disabled={busy || upstreamRefusesFiles}
+              title={
+                upstreamRefusesFiles
+                  ? 'This library is not serving model files. Start its daemon with --serve-files.'
+                  : undefined
+              }
+              onClick={start}
+            >
+              {busy ? 'Starting…' : notResident ? `${fetchLabel} again` : fetchLabel}
             </button>
           )}
           {/* A failed, quarantined or cancelled job is not the end of the
@@ -523,7 +592,38 @@ function ListingCard({
               Cancel
             </button>
           )}
-          {file?.download_url && status !== 'have' && (
+          {/* Archiving is the hub's action, not a client's: it captures the
+              provider's whole record so a takedown costs nothing. Offered only
+              for third-party listings, since a model already in the local
+              library is not something to fetch from a provider. */}
+          {config.archiveAvailable && !isUpstream && listing.id && (
+            <button
+              className="ghost"
+              disabled={archiving}
+              title="Keep the file, the provider's raw responses, the metadata and every preview"
+              onClick={async () => {
+                setArchiving(true)
+                setErr(null)
+                try {
+                  await archivePull({
+                    provider: listing.provider,
+                    model_id: listing.id,
+                    version_id: listing.version_id,
+                    dest_root: destRoot,
+                    type: listing.type,
+                    watch: true,
+                  })
+                } catch (e) {
+                  setErr((e as Error).message)
+                } finally {
+                  setArchiving(false)
+                }
+              }}
+            >
+              {archiving ? 'Archiving…' : 'Archive'}
+            </button>
+          )}
+          {file?.download_url && offerFetch && (
             <CopyButton
               value={`mm get ${file.download_url}`}
               label="Copy command"
@@ -700,6 +800,15 @@ function JobProgress({ job }: { job: DownloadJob }) {
         {job.index_error && (
           <p className="warn-note">
             Downloaded but not indexed yet — it will appear after the next scan. ({job.index_error})
+          </p>
+        )}
+        {/* Deliberately different words from the line above. The file IS in the
+            library here; only the metadata is thin, so telling the user to
+            rescan would be advice that cannot help. */}
+        {job.meta_error && (
+          <p className="warn-note">
+            In the library, but its details did not come across from the upstream — enrich it or
+            pull again to retry. ({job.meta_error})
           </p>
         )}
       </div>

@@ -110,7 +110,7 @@ func TestSweepRecordsEachModelAsItGoesAndStopsOnRateLimit(t *testing.T) {
 	}
 
 	// The first model's answer survives -- that is the resumability property.
-	owned, err := st.OwnedOriginModels(ProviderCivitaiID, 0, 0)
+	owned, err := st.OwnedOriginModels(ProviderCivitaiID, 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}

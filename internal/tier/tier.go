@@ -266,19 +266,14 @@ func (m *Manager) evictFor(needed int64, logf func(string, ...any)) error {
 //
 // Provisional paths are excluded: staging copies bytes and then presents them as
 // that model, which is a write-side decision, and §10.1 bars a probe-bound path
-// from those.
+// from those. The rule now lives in the store, because serving a model file over
+// HTTP needs exactly the same one and two copies would eventually disagree.
 func (m *Manager) confirmedSource(sha string) (string, int64, error) {
-	var path string
-	var size int64
-	err := m.st.DB().QueryRow(`
-        SELECT p.path, f.size
-          FROM model_file_path p JOIN model_file f ON f.sha256 = p.sha256
-         WHERE p.sha256 = ? AND p.present = 1 AND p.provisional = 0
-         ORDER BY p.id LIMIT 1`, sha).Scan(&path, &size)
+	row, size, err := m.st.ConfirmedPresentPath(sha)
 	if err != nil {
 		return "", 0, fmt.Errorf("tier: no confirmed on-disk copy of %s to stage", short(sha))
 	}
-	return path, size, nil
+	return row.Path, size, nil
 }
 
 // cachePath keeps the original filename so a consuming tool pointed at the cache

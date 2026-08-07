@@ -28,7 +28,16 @@ import (
 // remote listing can be compared against.
 type LocalIndex struct {
 	// bySHA maps an uppercase SHA256 to a representative local path.
+	//
+	// The path is for display and is populated even when the file is not there,
+	// so it says nothing about whether the model is on disk. That is a separate
+	// question with a separate map, because the answer differs and both are
+	// wanted: the path so a card can say where it was, and residency so a card
+	// can offer to fetch it back.
 	bySHA map[string]string
+
+	// resident records whether a hash has a present, confirmed path.
+	resident map[string]bool
 
 	// ownedVersions maps "provider/modelID" to the versions held locally.
 	ownedVersions map[string][]ownedVersion
@@ -48,17 +57,25 @@ type ownedVersion struct {
 func BuildLocalIndex(st *store.Store) (*LocalIndex, error) {
 	idx := &LocalIndex{
 		bySHA:         map[string]string{},
+		resident:      map[string]bool{},
 		ownedVersions: map[string][]ownedVersion{},
 	}
 
-	// Content hashes, with one present path each for display. A model with no
-	// present path is still indexed: it is still owned, just not mounted, and
-	// reporting it as new would prompt a pointless re-download.
+	// Content hashes, with one path each for display. A model with no present
+	// path is still indexed: it is still owned, just not mounted, and reporting
+	// it as new would prompt a pointless re-download.
+	//
+	// Residency is asked for separately rather than inferred from the path being
+	// empty. The path subquery orders present rows first but does not filter on
+	// them, so an evicted model still has a path to show -- which is the point
+	// of showing it, and would make "has a path" a wrong answer to "is it here".
 	rows, err := st.DB().Query(`
         SELECT f.sha256,
                COALESCE((SELECT p.path FROM model_file_path p
                           WHERE p.sha256 = f.sha256 AND p.provisional = 0
-                          ORDER BY p.present DESC, p.id LIMIT 1), '')
+                          ORDER BY p.present DESC, p.id LIMIT 1), ''),
+               EXISTS(SELECT 1 FROM model_file_path p
+                       WHERE p.sha256 = f.sha256 AND p.present = 1 AND p.provisional = 0)
           FROM model_file f`)
 	if err != nil {
 		return nil, fmt.Errorf("origin: indexing local hashes: %w", err)
@@ -66,10 +83,13 @@ func BuildLocalIndex(st *store.Store) (*LocalIndex, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var sha, path string
-		if err := rows.Scan(&sha, &path); err != nil {
+		var present int
+		if err := rows.Scan(&sha, &path, &present); err != nil {
 			return nil, err
 		}
-		idx.bySHA[strings.ToUpper(sha)] = path
+		upper := strings.ToUpper(sha)
+		idx.bySHA[upper] = path
+		idx.resident[upper] = present == 1
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -141,6 +161,16 @@ func (idx *LocalIndex) loadOwnedVersions(st *store.Store) error {
 			return err
 		}
 		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		// This is the one query in the file that reads lookup_key AS a content
+		// hash, and the assumption is worth asserting where it is relied on.
+		// Archive intake caches provider-side model and version ids in the same
+		// table under their own provider values, so this filter should never
+		// fire -- but a row that slipped through would be stored as an owned
+		// version whose SHA256 is the literal string "67890", and the library
+		// would claim to own a model nobody has downloaded.
+		if len(key) != 64 {
 			continue
 		}
 
@@ -303,9 +333,10 @@ func (idx *LocalIndex) match(l Listing) *LocalMatch {
 		}
 		if path, ok := idx.bySHA[strings.ToUpper(f.SHA256)]; ok {
 			return &LocalMatch{
-				Status: MatchHave,
-				SHA256: strings.ToUpper(f.SHA256),
-				Path:   path,
+				Status:   MatchHave,
+				SHA256:   strings.ToUpper(f.SHA256),
+				Path:     path,
+				Resident: idx.resident[strings.ToUpper(f.SHA256)],
 			}
 		}
 	}
@@ -330,6 +361,7 @@ func (idx *LocalIndex) match(l Listing) *LocalMatch {
 						Status:          MatchHave,
 						SHA256:          ov.SHA256,
 						Path:            idx.bySHA[ov.SHA256],
+						Resident:        idx.resident[ov.SHA256],
 						HaveVersionID:   ov.VersionID,
 						HaveVersionName: ov.VersionName,
 					}
@@ -350,6 +382,7 @@ func (idx *LocalIndex) match(l Listing) *LocalMatch {
 				Status:          status,
 				SHA256:          newest.SHA256,
 				Path:            idx.bySHA[newest.SHA256],
+				Resident:        idx.resident[newest.SHA256],
 				HaveVersionID:   newest.VersionID,
 				HaveVersionName: newest.VersionName,
 			}

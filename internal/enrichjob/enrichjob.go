@@ -87,6 +87,12 @@ type Job struct {
 	Images    int `json:"images"`
 	Errors    int `json:"errors"`
 
+	// ImageErrors counts previews that could not be fetched or stored, which is
+	// not the same failure as a model that could not be looked up. Reported
+	// separately because "found 400, images 0" otherwise reads as a library
+	// whose models have no previews rather than a provider nobody could reach.
+	ImageErrors int `json:"image_errors"`
+
 	// RateLimited means the provider rejected a request during this run. The
 	// run still ends in StateComplete -- it was not cancelled and nothing
 	// failed -- so without this flag it reads exactly like an exhaustive
@@ -170,6 +176,7 @@ func (m *Manager) run(ctx context.Context, job *Job, opts Options) {
 			job.Fetched, job.CacheHits = stats.Fetched, stats.CacheHits
 			job.Found, job.Missing = stats.Found, stats.Missing
 			job.Images, job.Errors = stats.Images, stats.Errors
+			job.ImageErrors = stats.ImageErrors
 			job.RateLimited = stats.RateLimited
 		},
 		Logf: func(format string, args ...any) {

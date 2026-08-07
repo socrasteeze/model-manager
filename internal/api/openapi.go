@@ -174,6 +174,70 @@ func openAPISpec(version string) []byte {
 				"Every stored opinion about each field, winner first", "Provenance",
 				jsonResponse(array(object(nil))), pathParam("sha", "SHA256 of the file")),
 
+			"/api/upstream": get(
+				"Status of the configured upstream library: whether one is named, "+
+					"reachable, accepting our credentials, and serving files. Those "+
+					"fail independently and each has its own fix, so they are "+
+					"reported separately. Never returns the token or an upstream path.",
+				"Upstream", jsonResponse(object(nil))),
+
+			"/api/pulls": get(
+				"Copies fetched from an upstream that are still on this disk, and how "+
+					"much space they represent", "Upstream", jsonResponse(object(nil))),
+
+			"/api/models/{sha}/evict": map[string]any{
+				"post": operation(
+					"Remove a local copy that was pulled from an upstream, keeping "+
+						"everything the library knows about it. Requires --allow-evict. "+
+						"Refused for a file that was not pulled, one a download still "+
+						"holds, one that has changed since it was indexed, and one a "+
+						"generated view links to.",
+					"Upstream", jsonResponse(object(nil)),
+					pathParam("sha", "SHA256 of the file")),
+			},
+
+			"/api/archive/pull": map[string]any{
+				"post": operation(
+					"Archive a model from a provider: the file, the raw responses, "+
+						"every metadata candidate and every preview, so a takedown "+
+						"costs nothing. Registers a job and returns. Requires "+
+						"--allow-archive.",
+					"Archive", jsonResponse(object(nil))),
+			},
+			"/api/archive": get(
+				"The running or most recent archive run, plus inventory counts. The "+
+					"counts answer even on a daemon that cannot start a run.",
+				"Archive", jsonResponse(object(nil))),
+			"/api/archive/items": get(
+				"The archive inventory. incomplete=true lists what is unfinished; "+
+					"gone=true lists what the provider no longer serves.",
+				"Archive", jsonResponse(object(nil)),
+				queryParam("incomplete", "Only unfinished archives"),
+				queryParam("gone", "Only models removed upstream")),
+			"/api/archive/watch": map[string]any{
+				"get": operation("Watched models, least recently checked first",
+					"Archive", jsonResponse(object(nil))),
+				"post": operation("Watch a model for new versions", "Archive",
+					jsonResponse(object(nil))),
+			},
+
+			"/api/models/{sha}/file": get(
+				"Stream the model file itself. Requires --serve-files; supports Range "+
+					"requests and returns the content hash as a strong ETag. 503 when "+
+					"file serving is off, 404 when no confirmed on-disk copy exists.",
+				"Models",
+				map[string]any{
+					"200": map[string]any{
+						"description": "The model file",
+						"content": map[string]any{
+							"application/octet-stream": map[string]any{
+								"schema": map[string]any{"type": "string", "format": "binary"},
+							},
+						},
+					},
+				},
+				pathParam("sha", "SHA256 of the file")),
+
 			"/api/models/{sha}/tags": map[string]any{
 				"put": operation("Replace the manual tag set", "Models",
 					jsonResponse(array(str(""))), pathParam("sha", "SHA256 of the file")),

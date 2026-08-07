@@ -11,6 +11,16 @@ export interface AppConfig {
   version: string
   /** Whether the daemon has a remote client and a writable enrichment manager. */
   enrichAvailable: boolean
+
+  /** Whether an upstream library is configured. Its reachability is a separate
+   *  question, answered by GET /api/upstream. */
+  upstreamConfigured: boolean
+
+  /** Whether this daemon may delete a pulled copy to reclaim space. */
+  evictAvailable: boolean
+
+  /** Whether this daemon may archive models from providers. */
+  archiveAvailable: boolean
 }
 
 declare global {
@@ -24,6 +34,9 @@ export const config: AppConfig = window.__MM__ ?? {
   readOnly: true,
   version: 'dev',
   enrichAvailable: false,
+  upstreamConfigured: false,
+  evictAvailable: false,
+  archiveAvailable: false,
 }
 
 export interface SearchHit {
@@ -163,6 +176,39 @@ export interface ModelDetail {
   training?: TrainingRecord
   suggestions: Suggestion[]
   header_truncated?: boolean
+
+  /** Which remote model and version this file was published as. */
+  origins?: ModelOrigin[]
+
+  /** Copies of this model fetched from an upstream. A resident entry is what
+   *  makes the evict action available. */
+  pulled?: PulledCopy[]
+
+  /** Intake records, when this model was deliberately archived from a provider.
+   *  Carries upstream_gone_at, which is the fact worth surfacing: this is now
+   *  the surviving copy. */
+  archive?: ArchiveItem[]
+}
+
+export interface ModelOrigin {
+  sha256: string
+  provider: string
+  origin_model_id: string
+  origin_version_id?: string
+  origin_version_name?: string
+  source?: string
+  updated_at?: string
+}
+
+export interface PulledCopy {
+  sha256: string
+  upstream: string
+  path: string
+  root: string
+  size_bytes: number
+  pulled_at: string
+  /** Empty while the copy is still on this disk. */
+  evicted_at?: string
 }
 
 export interface CandidateEntry {
@@ -323,6 +369,15 @@ export interface LocalMatch {
   path?: string
   have_version_id?: string
   have_version_name?: string
+
+  /**
+   * Whether the matched file is actually on this disk.
+   *
+   * A model is still "have" once evicted -- it is owned, just not resident --
+   * so this is what lets the card offer it back instead of saying "you have
+   * this" next to a file that is gone.
+   */
+  resident?: boolean
 }
 
 export interface Listing {
@@ -420,6 +475,12 @@ export interface DownloadJob {
   // Set when the file downloaded and verified but could not be indexed: it
   // exists on disk, the library just does not show it yet.
   index_error?: string
+  // Set when a pulled file arrived and was indexed but its metadata did not
+  // come across. Deliberately not index_error: the model IS in the library,
+  // so telling the user to rescan would be advice that cannot help.
+  meta_error?: string
+  // The upstream this was pulled from, empty for an ordinary download.
+  upstream_base?: string
   started_at: string
 }
 
@@ -463,6 +524,167 @@ export async function startDownload(req: StartDownload): Promise<{ status: strin
 
 export const cancelDownload = (id: string) =>
   request<{ status: string }>(`/api/downloads/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+// --- upstream library ---------------------------------------------------------
+
+/** The stable id of the upstream provider in a browse result. */
+export const PROVIDER_UPSTREAM = 'upstream'
+
+export interface UpstreamStatus {
+  /** Whether MM_UPSTREAM_URL is set. Configuration, not reachability. */
+  configured: boolean
+  reachable: boolean
+  authenticated: boolean
+  name?: string
+  /** host:port only. Never the token, never a path on the upstream. */
+  host?: string
+  version?: string
+  schema_version?: number
+  /** Whether the upstream will serve model files. 'unknown' means it predates
+   *  the capability and could not be probed. */
+  files: 'yes' | 'no' | 'unknown'
+  /** Folds in this daemon's own side: an upstream that serves files is no use
+   *  here if downloads are disabled. */
+  can_pull: boolean
+  error?: string
+}
+
+export const upstreamStatus = () => request<UpstreamStatus>('/api/upstream')
+
+export interface PullsSummary {
+  pulls: PulledCopy[]
+  reclaimable_bytes: number
+  evict_available: boolean
+}
+
+export const listPulls = () => request<PullsSummary>('/api/pulls')
+
+export interface EvictResult {
+  status: string
+  path: string
+  freed_bytes: number
+  upstream: string
+  detail?: ModelDetail
+}
+
+/**
+ * Delete one local copy that was pulled from an upstream.
+ *
+ * `path` is required only when a model has more than one copy on disk -- the
+ * server refuses to guess rather than picking one.
+ */
+export const evictLocal = (sha: string, body: { path?: string; upstream?: string } = {}) =>
+  request<EvictResult>(`/api/models/${encodeURIComponent(sha)}/evict`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+// --- archive ------------------------------------------------------------------
+
+export interface ArchiveItem {
+  provider: string
+  model_id: string
+  version_id: string
+  sha256?: string
+  archived_at: string
+  /** Set when the provider stopped serving this version. This is the state the
+   *  whole feature exists for. */
+  upstream_gone_at?: string
+
+  file_ok: boolean
+  meta_ok: boolean
+  origin_cache_ok: boolean
+  previews_ok: boolean
+
+  previews_total: number
+  previews_got: number
+
+  last_error?: string
+  last_attempt_at?: string
+}
+
+export const archiveComplete = (a: ArchiveItem) =>
+  a.file_ok && a.meta_ok && a.origin_cache_ok && a.previews_ok
+
+export interface ArchiveWatch {
+  provider: string
+  model_id: string
+  added_at: string
+  last_checked?: string
+  auto_pull: boolean
+}
+
+export interface ArchiveCounts {
+  items: number
+  complete: number
+  incomplete: number
+  gone: number
+  watched: number
+}
+
+export interface ArchiveJob {
+  id: string
+  state: 'running' | 'complete' | 'failed' | 'cancelled'
+  started_at: string
+  finished_at?: string
+  total: number
+  done: number
+  archived: number
+  partial: number
+  gone: number
+  errors: number
+  rate_limited: boolean
+  last_error?: string
+  error?: string
+}
+
+export interface ArchiveStatus {
+  available: boolean
+  unavailable_because?: string
+  job?: ArchiveJob
+  counts?: ArchiveCounts
+}
+
+export const archiveStatus = () => request<ArchiveStatus>('/api/archive')
+
+export interface ArchivePullRequest {
+  provider?: string
+  model_id: string
+  version_id?: string
+  dest_root?: string
+  subdir?: string
+  type?: string
+  watch?: boolean
+  force?: boolean
+}
+
+export const archivePull = (req: ArchivePullRequest) =>
+  request<{ job: ArchiveJob }>('/api/archive/pull', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  })
+
+export const cancelArchive = (id: string) =>
+  request<void>(`/api/archive/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+export function archiveItems(opts: { incomplete?: boolean; gone?: boolean } = {}) {
+  const params = new URLSearchParams()
+  if (opts.incomplete) params.set('incomplete', 'true')
+  if (opts.gone) params.set('gone', 'true')
+  const q = params.toString()
+  return request<{ items: ArchiveItem[] }>(`/api/archive/items${q ? `?${q}` : ''}`)
+}
+
+export const listWatches = () => request<{ watches: ArchiveWatch[] }>('/api/archive/watch')
+
+export const addWatch = (w: { provider?: string; model_id: string; auto_pull?: boolean }) =>
+  request<{ status: string }>('/api/archive/watch', { method: 'POST', body: JSON.stringify(w) })
+
+export const removeWatch = (provider: string, modelID: string) =>
+  request<void>(
+    `/api/archive/watch/${encodeURIComponent(provider)}/${encodeURIComponent(modelID)}`,
+    { method: 'DELETE' },
+  )
 
 export interface Update {
   sha256: string

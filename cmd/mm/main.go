@@ -60,6 +60,7 @@ COMMANDS
     link-probe Report which link mechanisms work between two directories
     detect     Find installed SD tools and their model roots
     reindex    Rebuild the search index and re-resolve every record
+    evict      Remove a copy pulled from an upstream, keeping everything known about it
     thumbs     Derive grid-sized copies of previews that lack one
     comfy      Check and plan ComfyUI workflows for thumbnail rendering
     report     Summarize the index: distinct models, duplication, size spread
@@ -109,6 +110,8 @@ func main() {
 		err = cmdDetect(os.Args[2:])
 	case "reindex":
 		err = cmdReindex(os.Args[2:])
+	case "evict":
+		err = cmdEvict(os.Args[2:])
 	case "thumbs":
 		err = cmdThumbs(ctx, os.Args[2:])
 	case "comfy":

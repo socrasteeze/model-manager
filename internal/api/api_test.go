@@ -170,6 +170,76 @@ func TestTokenRequiredWhenSet(t *testing.T) {
 	}
 }
 
+// TestEveryRouteRequiresTheTokenWhenSet pins the whole surface, not one route.
+//
+// The shape this fails in is a liveness-probe exemption for /api/health. That
+// handler emits the capability list and the absolute database path
+// unconditionally, so exempting it would hand an unauthenticated caller a map of
+// what this daemon serves and where its index lives -- and the exemption would
+// look entirely reasonable to whoever added it for their monitoring tool.
+//
+// The right escape hatch, if one is ever needed, is a route that has nothing to
+// leak: GET /api/ping returning 204 with no body, in an explicit exemption set.
+// Not an exemption for a route that reports configuration.
+func TestEveryRouteRequiresTheTokenWhenSet(t *testing.T) {
+	s := newServer(t, func(c *Config) {
+		c.Security.RequireToken = true
+		c.Security.Token = "secret-token"
+		// On, so the capability list is non-empty and a leak is visible rather
+		// than hidden behind an empty array.
+		c.ServeFiles = true
+	})
+
+	// Things an unauthenticated caller must never learn.
+	secrets := []string{"capabilities", CapServeFiles, s.cfg.Store.Path()}
+
+	paths := []string{
+		"/api/health", "/api/models", "/api/models/aaa", "/api/models/aaa/candidates",
+		"/api/models/aaa/file", "/api/pulls", "/api/upstream", "/api/settings",
+		"/api/roots", "/api/stats", "/api/facets", "/api/detect", "/api/downloads",
+		"/openapi.json",
+	}
+	for _, p := range paths {
+		w := do(s, "GET", "http://localhost"+p, "", nil)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s returned %d without a token, want 401", p, w.Code)
+		}
+		body := w.Body.String()
+		for _, secret := range secrets {
+			if secret != "" && strings.Contains(body, secret) {
+				t.Errorf("%s leaked %q to an unauthenticated caller: %s", p, secret, body)
+			}
+		}
+	}
+}
+
+// capabilities is a tri-state and a client reads all three: a list containing
+// the capability, a list without it, and no key at all. The last means a daemon
+// older than the idea, which has to be probed for instead.
+//
+// Emitting the key conditionally -- the obvious way to "hide capabilities" --
+// collapses the second case into the third, and sends every new client down the
+// probe path against a daemon that could simply have answered.
+func TestHealthCapabilitiesAlwaysPresentEvenWhenEmpty(t *testing.T) {
+	s := newServer(t, func(c *Config) { c.ServeFiles = false })
+
+	w := do(s, "GET", "http://localhost/api/health", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("health returned %d", w.Code)
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := body["capabilities"]
+	if !ok {
+		t.Fatal("capabilities key absent; a client would read this daemon as too old to have the feature")
+	}
+	if string(raw) != "[]" {
+		t.Errorf("capabilities = %s, want exactly []", raw)
+	}
+}
+
 // A tailnet is authenticated before a packet arrives, so §11 permits exempting
 // it -- but only when explicitly configured.
 func TestTrustedCIDRExemptsTheToken(t *testing.T) {

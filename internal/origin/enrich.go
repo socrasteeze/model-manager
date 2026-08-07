@@ -60,6 +60,15 @@ type EnrichStats struct {
 	Images     int
 	Errors     int
 
+	// ImageErrors counts previews that could not be fetched or stored.
+	//
+	// Separate from Errors, which counts models: a model whose metadata arrived
+	// and whose previews did not is enriched, just not illustrated. Without this
+	// counter that outcome is indistinguishable from a model with no previews
+	// upstream -- which is the answer an offline run would give for the entire
+	// library, reported as a clean success.
+	ImageErrors int
+
 	// RateLimited means the provider cut the run short: the result covers only
 	// the models reached before that happened. Without this flag a truncated
 	// sweep is indistinguishable from "every eligible model was looked up",
@@ -171,8 +180,9 @@ func Enrich(ctx context.Context, st *store.Store, opts EnrichOptions) (*EnrichSt
 		}
 
 		if !opts.SkipImages && opts.Blobs != nil {
-			n := fetchImages(ctx, opts, st, sha, images)
+			n, failed := fetchImages(ctx, opts, st, sha, images)
 			stats.Images += n
+			stats.ImageErrors += failed
 		}
 
 		if _, err := st.ResolveModel(sha); err != nil {
@@ -191,6 +201,21 @@ func Enrich(ctx context.Context, st *store.Store, opts EnrichOptions) (*EnrichSt
 	return stats, nil
 }
 
+// refreshFloor is how recently a negative answer must have been recorded for
+// even an explicit Refresh to honour it.
+//
+// Refresh exists so pressing a button on one model means "go and ask now"
+// rather than "re-read what was cached in March". It is not a reason to ask the
+// same question four times a minute, and for a file the provider does not have,
+// the answer will not change today. Without a floor, the per-model button --
+// which defaults Refresh to true -- re-queries a taken-down model on every
+// click, forever, with the negative cache bypassed entirely.
+//
+// A floor rather than a gone-marker because this lookup is keyed by content
+// hash while gone-ness is keyed by model id, and the two are linked only through
+// model_origin, which a file that was never enriched does not have.
+const refreshFloor = 6 * time.Hour
+
 // c_lookup returns the archived response, fetching it if needed.
 func c_lookup(ctx context.Context, cache *Cache, opts EnrichOptions, sha string) (json.RawMessage, bool, error) {
 	if !opts.Refresh {
@@ -202,6 +227,12 @@ func c_lookup(ctx context.Context, cache *Cache, opts EnrichOptions, sha string)
 			}
 			return nil, true, nil
 		}
+	} else if entry, ok, err := cache.Get(ProviderCivitai, sha); err == nil && ok &&
+		!entry.Found && time.Since(entry.FetchedAt) < refreshFloor {
+		// Cache.Get already reports a miss once the negative TTL has passed, so
+		// this only ever sees a live negative. A positive is still re-fetched
+		// under Refresh, which is what the button is for.
+		return nil, true, nil
 	}
 
 	raw, status, err := opts.Client.LookupCivitaiByHash(ctx, sha)
@@ -219,23 +250,42 @@ func c_lookup(ctx context.Context, cache *Cache, opts EnrichOptions, sha string)
 	return raw, false, nil
 }
 
-func fetchImages(ctx context.Context, opts EnrichOptions, st *store.Store, sha string, urls []string) int {
-	stored := 0
+// fetchImages returns how many previews were stored and how many failed.
+//
+// Failures stay non-fatal -- a model with its name and trigger words but no
+// picture is still enriched -- but they are counted and the first is logged.
+// Silently returning "0 stored" made an unreachable provider look exactly like
+// a library whose models simply have no previews.
+func fetchImages(ctx context.Context, opts EnrichOptions, st *store.Store, sha string, urls []string) (int, int) {
+	stored, failed := 0, 0
+	logf := opts.Logf
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
 	for i, url := range urls {
 		if i >= opts.MaxImages || ctx.Err() != nil {
 			break
 		}
 		data, err := opts.Client.fetchBytes(ctx, url)
 		if err != nil {
+			if failed == 0 {
+				logf("%s: preview: %v", short(sha), err)
+			}
+			failed++
 			continue
 		}
 		// Sniff rather than trust the URL's extension: a preview that is not an
 		// image must never reach the blob store.
 		if !blobstore.IsImage(data) {
+			failed++
 			continue
 		}
 		blob, err := opts.Blobs.Put(data)
 		if err != nil {
+			if failed == 0 {
+				logf("%s: preview: %v", short(sha), err)
+			}
+			failed++
 			continue
 		}
 
@@ -260,11 +310,16 @@ func fetchImages(ctx context.Context, opts EnrichOptions, st *store.Store, sha s
 			p.Width, p.Height = w, h
 		}
 
-		if err := st.AddPreviewImage(p); err == nil {
-			stored++
+		if err := st.AddPreviewImage(p); err != nil {
+			if failed == 0 {
+				logf("%s: preview: %v", short(sha), err)
+			}
+			failed++
+			continue
 		}
+		stored++
 	}
-	return stored
+	return stored, failed
 }
 
 // maxTargetParams caps how many caller-supplied hashes are looked up directly
@@ -385,7 +440,7 @@ func (c *Client) fetchBytes(ctx context.Context, url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, err
 	}

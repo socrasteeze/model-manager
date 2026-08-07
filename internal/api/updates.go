@@ -32,18 +32,34 @@ func (s *Server) updatePrereq() (int, string, string) {
 		return http.StatusServiceUnavailable, "update checking is not available",
 			"an update check writes to the library, so it is offered only on a daemon started with --writable"
 	}
-	// Both sweeps spend the same shared origin.Client throttle. jobrun only
-	// enforces at-most-one within a Runner, so without this they would each be
-	// politely paced and together double the request rate against the very API
-	// the throttle exists to placate -- the failure enrichjob's package comment
-	// warns about.
-	if s.cfg.Enrich != nil {
-		if _, running := s.cfg.Enrich.InFlight(); running {
-			return http.StatusConflict, "an enrichment run is already in progress",
-				"both talk to the same provider on one shared rate limit; wait for it to finish"
-		}
+	return s.sharedThrottleFree(jobUpdates)
+}
+
+// Keys for the members of the shared-throttle group.
+const (
+	jobEnrich  = "enrich"
+	jobUpdates = "updates"
+)
+
+// sharedThrottleFree reports why another sweep blocks this one, or 0.
+//
+// Every sweep spends the same origin.Client throttle, and jobrun only enforces
+// at-most-one within a Runner. Without this they would each be politely paced
+// and together multiply the request rate against the very API the throttle
+// exists to placate. It used to be a pairwise check written out here, which was
+// already one-directional -- updates asked about enrichment and enrichment did
+// not ask about updates -- and every new sweep would have doubled the number of
+// checks somebody had to remember.
+func (s *Server) sharedThrottleFree(self string) (int, string, string) {
+	label, id, busy := s.cfg.Jobs.Busy(self)
+	if !busy {
+		return 0, "", ""
 	}
-	return 0, "", ""
+	detail := "they talk to the same provider on one shared rate limit; wait for it to finish"
+	if id != "" {
+		detail = "job " + id + " is running. " + detail
+	}
+	return http.StatusConflict, "a " + label + " run is already in progress", detail
 }
 
 // handleUpdates handles GET /api/updates.

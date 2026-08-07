@@ -608,4 +608,193 @@ SELECT mo.sha256,
                       AND o.provider < mo.provider
                       AND s2.latest_version_id <> '');
 `,
+
+	// --- 7: copies pulled from an upstream model-manager ----------------------
+	`
+-- The precondition for eviction, and the only intentionally machine-local table
+-- in this schema.
+--
+-- Deleting a local copy is defensible only when the copy is provably
+-- re-derivable, and "provably" has to mean a row written by the code that
+-- performed the fetch -- not an inference from a URL that happens to look like
+-- an upstream one, and not the mere existence of metadata that came from
+-- somewhere.
+--
+-- Deliberately NOT a model_origin row. That table records a fact about the
+-- *content*: "this file was published as Civitai model 999 version 4567", which
+-- is true of every copy of those bytes on any machine in the world. This records
+-- a fact about *this instance*: "this daemon fetched this copy from that host,
+-- into that path, at that time". Different key, different lifetime, and
+-- model_origin has nowhere to put the path, the size or the eviction stamp.
+CREATE TABLE pulled_file (
+    sha256      TEXT    NOT NULL REFERENCES model_file(sha256) ON DELETE CASCADE,
+
+    -- Base URL of the daemon this copy came from, as configured. Part of the key
+    -- because one model may be pulled from two upstreams, and eviction has to
+    -- know which one it can be fetched back from.
+    upstream    TEXT    NOT NULL,
+
+    -- The absolute path written, and the canonical root it sits under. Recorded
+    -- rather than looked up at eviction time: "the first present path" is not
+    -- the same claim, and a tier-staged copy is a second present path that must
+    -- never be deletable through this route.
+    --
+    -- Part of the key, which is the whole point. Keyed on (sha256, upstream)
+    -- alone, pulling one model into two roots made the second fetch overwrite
+    -- the first's row -- and the first file could then never satisfy eviction's
+    -- "is this the copy we pulled" guard, so it was undeletable for good, with
+    -- a refusal claiming it was not a copy this daemon had fetched. One row per
+    -- copy, and each evicts on its own.
+    path        TEXT    NOT NULL,
+    root        TEXT    NOT NULL,
+
+    size_bytes  INTEGER NOT NULL,
+    pulled_at   TEXT    NOT NULL,
+
+    -- NULL while the copy is resident. Set, not deleted, on eviction: the point
+    -- of the feature is that the library still knows the model is available
+    -- from that upstream, and a deleted row would forget it.
+    evicted_at  TEXT,
+
+    PRIMARY KEY (sha256, upstream, path)
+) STRICT;
+
+-- "What could I free, and how much?" is the question the settings panel asks.
+CREATE INDEX idx_pulled_file_resident ON pulled_file (evicted_at) WHERE evicted_at IS NULL;
+`,
+
+	// --- 8: deliberate archive intake -----------------------------------------
+	`
+-- Enrichment answers "what is this file I already have?", keyed by a hash we
+-- computed locally. This answers a different question: acquire this model FROM
+-- the provider such that the provider can vanish and nothing is lost.
+--
+-- The difference shows up in what it is keyed by -- a provider's own model and
+-- version ids, for a file that may not exist here yet -- and in what "done"
+-- means: the file, the metadata body, the preview bytes and the archived
+-- response each succeed or fail on their own.
+--
+-- Four booleans rather than one status column, because a partial archive is the
+-- normal case and "partial" is not actionable. Which part is missing is what
+-- decides between retrying, waiting, and accepting it.
+CREATE TABLE archive_item (
+    provider     TEXT NOT NULL,
+
+    -- TEXT for the reason model_origin gives: a provider is not obliged to
+    -- number its models forever, and a non-numeric id must round-trip rather
+    -- than silently become 0.
+    model_id     TEXT NOT NULL,
+    version_id   TEXT NOT NULL,
+
+    -- The content hash, once the file has landed. Deliberately NOT a foreign key
+    -- to model_file: the row is created before the download starts, and for a
+    -- model taken down before it could be fetched the file may never arrive at
+    -- all. A hard key would make the one case this table exists for -- a record
+    -- of something that is gone -- the one case it cannot hold. Empty until
+    -- known, matching model_origin's convention for unset ids.
+    sha256       TEXT NOT NULL DEFAULT '',
+
+    archived_at  TEXT NOT NULL,
+
+    -- Set when the provider stopped serving THIS VERSION. Distinct from
+    -- origin_model_status.upstream_gone_at, which says the whole MODEL is gone:
+    -- providers remove individual versions while keeping the model, so neither
+    -- fact implies the other and neither can be derived from the other.
+    upstream_gone_at TEXT,
+
+    file_ok          INTEGER NOT NULL DEFAULT 0,
+    meta_ok          INTEGER NOT NULL DEFAULT 0,
+    origin_cache_ok  INTEGER NOT NULL DEFAULT 0,
+    previews_ok      INTEGER NOT NULL DEFAULT 0,
+
+    -- previews_ok is a judgement; these two are the evidence behind it, kept
+    -- because "3 of 12" and "0 of 0" are different situations that a single
+    -- previews_ok = 0 cannot tell apart -- and the first is retryable while the
+    -- second is already complete.
+    previews_total   INTEGER NOT NULL DEFAULT 0,
+    previews_got     INTEGER NOT NULL DEFAULT 0,
+
+    -- Why it is partial, so a partial archive says something rather than only
+    -- that it is partial.
+    last_error       TEXT NOT NULL DEFAULT '',
+    last_attempt_at  TEXT NOT NULL DEFAULT '',
+
+    -- Version-keyed, because "archive this model" is not an operation: a model
+    -- is a series of releases and archiving it means archiving one of them.
+    PRIMARY KEY (provider, model_id, version_id)
+) STRICT;
+
+-- "What have I archived of this file?", and the reverse lookup a scan needs when
+-- a file it just indexed turns out to be one an intake was waiting for.
+CREATE INDEX idx_archive_item_sha ON archive_item (sha256) WHERE sha256 <> '';
+
+-- "What is still incomplete?" -- the list the UI shows and the scheduler re-runs.
+-- Partial, because the complete rows are the majority and are never the answer.
+CREATE INDEX idx_archive_item_incomplete ON archive_item (provider, model_id)
+    WHERE file_ok = 0 OR meta_ok = 0 OR previews_ok = 0 OR origin_cache_ok = 0;
+
+-- Preview bytes staged before there is a file to hang them on.
+--
+-- preview_image has a foreign key to model_file, so a preview cannot be recorded
+-- until the model has been downloaded, hashed and indexed. That is the wrong
+-- constraint for an archive: a model taken down before you fetched it takes its
+-- previews with it, a mirror of the metadata does not mirror the images, and a
+-- preview is not reconstructible from anything else. So the bytes go into the
+-- blob store at once and their identity is recorded here; the download
+-- completion hook copies them into preview_image if and when the file lands.
+CREATE TABLE archive_preview (
+    provider     TEXT    NOT NULL,
+    model_id     TEXT    NOT NULL,
+    version_id   TEXT    NOT NULL,
+
+    -- The blob store's key. No foreign key anywhere: the blob store is a
+    -- directory of content-addressed files, not a table.
+    image_sha256 TEXT    NOT NULL,
+
+    -- Where it came from, so a re-run can tell "already fetched" from "never
+    -- tried" without spending a request, and so the dedup between the version
+    -- body's images and the gallery endpoint has something to key on.
+    source_url   TEXT    NOT NULL,
+
+    position     INTEGER NOT NULL DEFAULT 0,
+    mime         TEXT    NOT NULL DEFAULT '',
+    bytes        INTEGER NOT NULL DEFAULT 0,
+    fetched_at   TEXT    NOT NULL,
+
+    PRIMARY KEY (provider, model_id, version_id, image_sha256)
+) STRICT;
+
+CREATE INDEX idx_archive_preview_url ON archive_preview (source_url);
+
+CREATE TABLE archive_watch (
+    provider     TEXT    NOT NULL,
+    model_id     TEXT    NOT NULL,
+    added_at     TEXT    NOT NULL,
+
+    -- Empty until the first check. Ordered on by the scheduler, so a tick cut
+    -- short by a rate limit still makes forward progress across ticks -- the
+    -- same resumability rule OwnedOriginModels applies, for the same reason.
+    last_checked TEXT    NOT NULL DEFAULT '',
+
+    -- Whether a newly discovered version is fetched automatically or only
+    -- reported. Off by default: a watch is a subscription to information, and
+    -- turning it into a subscription to unattended multi-gigabyte downloads is a
+    -- separate decision that has to be made separately.
+    auto_pull    INTEGER NOT NULL DEFAULT 0,
+
+    PRIMARY KEY (provider, model_id)
+) STRICT;
+
+CREATE INDEX idx_archive_watch_stale ON archive_watch (last_checked);
+
+-- Model-level takedown, recorded where model-level facts already live.
+--
+-- Not a column on archive_item, because the problem it fixes is not confined to
+-- archived models: OwnedOriginModels does not filter on http_status, so a model
+-- a sweep has 404'd returns to the queue on every subsequent sweep -- and with
+-- the API's default max age of zero, that is every model, every time, forever.
+-- Nullable with no default, so every existing row reads as "not gone" without a
+-- backfill.
+ALTER TABLE origin_model_status ADD COLUMN upstream_gone_at TEXT;
+`,
 }

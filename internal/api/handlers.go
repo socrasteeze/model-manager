@@ -27,7 +27,36 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"database":       s.cfg.Store.Path(),
 		"read_only":      s.cfg.ReadOnly,
 		"uptime_seconds": int(time.Since(s.started).Seconds()),
+		"capabilities":   s.capabilities(),
 	})
+}
+
+// Capability names advertised by /api/health.
+const (
+	// CapServeFiles means GET /api/models/{sha}/file will stream model bytes.
+	CapServeFiles = "serve-files"
+)
+
+// capabilities lists the optional features this daemon has switched on.
+//
+// Version strings cannot answer this: whether files are served is a flag, not a
+// release. A client that wants to pull needs to distinguish three cases -- the
+// daemon serves files, the daemon is new enough to serve files but has not been
+// told to, and the daemon predates the idea entirely -- and only the first two
+// are visible here. The third shows up as the key being absent, which is exactly
+// the signal a client needs to fall back to probing.
+//
+// /openapi.json is the wrong place for this: it is hand-written, so it describes
+// what this build can do rather than what this process will do.
+func (s *Server) capabilities() []string {
+	// Non-nil so the field serializes as [] rather than null; a client
+	// distinguishing "no capabilities" from "an older daemon" reads the
+	// difference between an empty list and a missing key.
+	caps := []string{}
+	if s.cfg.ServeFiles {
+		caps = append(caps, CapServeFiles)
+	}
+	return caps
 }
 
 // searchQueryFrom reads a SearchQuery off the request. Shared by /api/models
@@ -78,6 +107,24 @@ type ModelDetail struct {
 	Tags          []string              `json:"tags"`
 	Training      *store.TrainingRecord `json:"training,omitempty"`
 	Suggestions   []store.Suggestion    `json:"suggestions"`
+
+	// Origins is which remote model and version this file was published as.
+	//
+	// Exposed so a client pulling this model can replay the rows locally and
+	// have its own update sweep badge the result without holding a provider key
+	// of its own. Additive on the wire: an older daemon omits it and a client
+	// decodes nil, losing the badge and nothing else.
+	Origins []store.ModelOrigin `json:"origins,omitempty"`
+
+	// Pulled is the copies of this model fetched from an upstream, and is what
+	// makes the evict action available. Local to this daemon; an upstream's own
+	// answer here says nothing about the machine asking.
+	Pulled []store.PulledCopy `json:"pulled,omitempty"`
+
+	// Archive is the intake records covering this file, when it was deliberately
+	// archived from a provider. Carries upstream_gone_at, which is the fact the
+	// whole archive exists to be able to state: this is now the surviving copy.
+	Archive []store.ArchiveItem `json:"archive,omitempty"`
 
 	// HeaderTruncated tells the UI why a training record might be thin.
 	HeaderTruncated bool `json:"header_truncated,omitempty"`
@@ -134,6 +181,15 @@ func (s *Server) modelDetail(sha string) (*ModelDetail, error) {
 		return nil, err
 	}
 	if d.Suggestions, err = st.PendingSuggestions(sha, 0); err != nil {
+		return nil, err
+	}
+	if d.Origins, err = st.ModelOrigins(sha); err != nil {
+		return nil, err
+	}
+	if d.Pulled, err = st.PulledCopies(sha); err != nil {
+		return nil, err
+	}
+	if d.Archive, err = st.ArchiveItemsForFile(sha); err != nil {
 		return nil, err
 	}
 	return &d, nil

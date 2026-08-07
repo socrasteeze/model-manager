@@ -69,6 +69,66 @@ func TestDownloadAndImageAllowlistsAgree(t *testing.T) {
 	}
 }
 
+// TestUpstreamHostAllowedExactlyAndOnlyWhenConfigured is the SSRF boundary for
+// the whole upstream feature. Every other host on this allowlist is a public
+// provider domain matched by suffix; the upstream is a private host matched by
+// equality, and the difference is load-bearing.
+//
+// The localhost cases are deliberate rather than paranoid. Running two daemons
+// on one box, or reaching the NAS through an SSH tunnel, makes
+// MM_UPSTREAM_URL=http://localhost:8737 a legitimate configuration -- so the
+// allowlist has to widen for that exact port without widening "localhost",
+// which the pre-existing tests below pin as denied.
+func TestUpstreamHostAllowedExactlyAndOnlyWhenConfigured(t *testing.T) {
+	configured := newServer(t, func(c *Config) {
+		c.Origin = &origin.Client{UpstreamBase: "http://nas.example:8737"}
+	})
+	if !configured.imageHostAllowed("nas.example:8737") {
+		t.Error("configured upstream host rejected")
+	}
+	denied := []string{
+		// No port, wrong port, and a sibling subdomain: none of these is the
+		// machine the operator named, and a suffix match would accept the last.
+		"nas.example", "nas.example:9999", "evil.nas.example:8737",
+		"localhost", "127.0.0.1", "169.254.169.254", "evil.com",
+	}
+	for _, h := range denied {
+		if configured.imageHostAllowed(h) {
+			t.Errorf("host %q allowed by an upstream configured as nas.example:8737", h)
+		}
+	}
+
+	// The tunnel case: an explicit localhost upstream widens its own port only.
+	tunnel := newServer(t, func(c *Config) {
+		c.Origin = &origin.Client{UpstreamBase: "http://localhost:8737"}
+	})
+	if !tunnel.imageHostAllowed("localhost:8737") {
+		t.Error("explicitly configured localhost upstream rejected")
+	}
+	if tunnel.imageHostAllowed("localhost") || tunnel.imageHostAllowed("localhost:9999") {
+		t.Error("localhost upstream widened beyond its own port")
+	}
+
+	// Without an upstream the host is denied, so the widening cannot be reached
+	// by any daemon that did not opt in.
+	unconfigured := newServer(t, func(c *Config) { c.Origin = &origin.Client{} })
+	if unconfigured.imageHostAllowed("nas.example:8737") {
+		t.Error("upstream host allowed with no upstream configured")
+	}
+
+	// And the download side must not drift from the image side, under every one
+	// of these configurations -- the property TestDownloadAndImageAllowlistsAgree
+	// pins for the static list.
+	for _, s := range []*Server{configured, tunnel, unconfigured} {
+		for _, h := range append(denied, "nas.example:8737", "localhost:8737") {
+			if s.downloadHostAllowed(h) != s.imageHostAllowed(h) {
+				t.Errorf("allowlists diverged for %q: download=%v image=%v",
+					h, s.downloadHostAllowed(h), s.imageHostAllowed(h))
+			}
+		}
+	}
+}
+
 // handleRemoteImage must refuse a disallowed host before making any outbound
 // request -- checked here without touching the network, since the rejection
 // happens at the URL-parse stage.

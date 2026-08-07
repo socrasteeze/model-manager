@@ -32,7 +32,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/socrasteeze/model-manager/internal/diskspace"
 	"github.com/socrasteeze/model-manager/internal/download"
+	"github.com/socrasteeze/model-manager/internal/evict"
 	"github.com/socrasteeze/model-manager/internal/store"
 )
 
@@ -112,6 +114,15 @@ func (s *Server) handleCreateDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Asked before a byte moves. The size is known from the listing, so a
+	// transfer that cannot possibly fit should fail in the first second rather
+	// than in the fortieth minute with a full disk and an orphaned partial.
+	if short := s.spaceShortfall(destDir, req.Size); short != nil {
+		writeError(w, http.StatusInsufficientStorage,
+			"not enough free space for this download", short.Error())
+		return
+	}
+
 	job := download.Job{
 		URL:      target.String(),
 		DestDir:  destDir,
@@ -123,6 +134,11 @@ func (s *Server) handleCreateDownload(w http.ResponseWriter, r *http.Request) {
 		DestRoot:       matchedRoot,
 		ExpectedSHA256: strings.TrimSpace(req.SHA256),
 		ExpectedSize:   req.Size,
+		// Decided here, from the same host comparison the allowlist just made,
+		// rather than re-derived later from the URL. It marks this transfer as
+		// a pull: the completion hook reads it to know there is metadata worth
+		// carrying over, and the row it writes is what makes the copy evictable.
+		UpstreamBase: s.upstreamBaseFor(target),
 	}
 
 	// Start registers the job synchronously and runs the transfer detached
@@ -272,29 +288,9 @@ func (s *Server) resolveDestination(root, subdir string) (string, string, error)
 		destAbs = filepath.Join(rootAbs, clean)
 	}
 
-	// EvalSymlinks fails for a directory that does not exist yet, which is a
-	// legitimate case for a new subdirectory. Check the nearest existing parent
-	// instead, since that is what determines where the write actually lands.
-	//
-	// Only a genuinely-missing component may walk up. Any other error — a
-	// permission-denied directory, an I/O fault — is a refusal, because
-	// climbing past a component we could not inspect would climb past exactly
-	// the symlink this check exists to catch.
-	check := destAbs
-	for {
-		resolved, err := filepath.EvalSymlinks(check)
-		if err == nil {
-			check = resolved
-			break
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", "", fmt.Errorf("cannot verify destination: %v", err)
-		}
-		parent := filepath.Dir(check)
-		if parent == check {
-			break
-		}
-		check = parent
+	check, err := deepestExistingDir(destAbs)
+	if err != nil {
+		return "", "", err
 	}
 	if !withinRoot(rootAbs, check) {
 		return "", "", fmt.Errorf("destination escapes the model root")
@@ -303,6 +299,103 @@ func (s *Server) resolveDestination(root, subdir string) (string, string, error)
 		return "", "", fmt.Errorf("destination escapes the model root")
 	}
 	return destAbs, matched, nil
+}
+
+// spaceShortfall reports why a transfer of size bytes will not fit, or nil.
+//
+// Both filesystems are checked, not just the destination, and that is the whole
+// point of doing this properly. The transfer writes the entire file into the
+// manager's work directory beside the database and only publishes it afterwards
+// -- and across a filesystem boundary, publish falls back to a copy, so for the
+// length of that copy the bytes exist in BOTH places at once. On the ordinary
+// deployment (database on the system disk, models on the array) those are always
+// two different filesystems, so checking only the destination happily accepts a
+// transfer that fills the system disk instead.
+//
+// Returns nil for an unknown size, an unmeasurable filesystem, and a failed
+// statfs. A courtesy that refuses downloads when it cannot do its job is worse
+// than no courtesy: the real disk-full condition is still caught during the
+// transfer, which is where it was caught before this existed.
+func (s *Server) spaceShortfall(destDir string, size int64) error {
+	if size <= 0 || s.cfg.Downloads == nil {
+		return nil
+	}
+	need := size + diskspace.Margin(size)
+
+	// The work directory always exists (NewManager creates it); the destination
+	// may not yet, so it resolves to the ancestor the write lands on.
+	dest, err := deepestExistingDir(destDir)
+	if err != nil {
+		return nil
+	}
+
+	for _, place := range []struct{ what, dir string }{
+		{"the download staging directory", s.cfg.Downloads.WorkDir},
+		{"the destination", dest},
+	} {
+		free, err := s.freeSpace(place.dir)
+		if err != nil {
+			continue
+		}
+		if free < need {
+			return fmt.Errorf(
+				"%s (%s) has %s free; this download needs %s including headroom",
+				place.what, place.dir, humanBytes(free), humanBytes(need))
+		}
+	}
+	return nil
+}
+
+// freeSpace is diskspace.Avail unless a test has replaced it. The seam exists
+// because the only other way to exercise a 507 is to fill a real disk.
+func (s *Server) freeSpace(dir string) (int64, error) {
+	if s.cfg.FreeSpace != nil {
+		return s.cfg.FreeSpace(dir)
+	}
+	return diskspace.Avail(dir)
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// deepestExistingDir returns the closest existing, symlink-resolved ancestor of
+// path: the directory a write into path would actually land on.
+//
+// EvalSymlinks fails for a directory that does not exist yet, which is a
+// legitimate case for a new subdirectory. Only a genuinely-missing component may
+// walk up. Any other error -- a permission-denied directory, an I/O fault -- is
+// a refusal, because climbing past a component we could not inspect would climb
+// past exactly the symlink the containment check exists to catch.
+//
+// Shared by that containment check, which needs it to know what it is really
+// checking, and by the free-space preflight, which needs it because a filesystem
+// cannot be asked about a directory that does not exist yet.
+func deepestExistingDir(path string) (string, error) {
+	check := path
+	for {
+		resolved, err := filepath.EvalSymlinks(check)
+		if err == nil {
+			return resolved, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("cannot verify destination: %v", err)
+		}
+		parent := filepath.Dir(check)
+		if parent == check {
+			return check, nil
+		}
+		check = parent
+	}
 }
 
 // cleanSubdir reduces a requested subdirectory to a safe relative path.
@@ -402,14 +495,13 @@ func confineToDir(dir, rel, what string) (string, error) {
 	return resolved, nil
 }
 
-func pathsEqual(a, b string) bool {
-	aa, err1 := filepath.Abs(a)
-	bb, err2 := filepath.Abs(b)
-	if err1 != nil || err2 != nil {
-		return a == b
-	}
-	return filepath.Clean(aa) == filepath.Clean(bb)
-}
+// pathsEqual reports whether two spellings name the same file or directory.
+//
+// Shared with the evict package, which needs the same comparison for a call
+// that deletes one of the two: a root entered as d:\models and recorded as
+// D:\Models is one directory, and the rule about when that is true belongs in
+// one place.
+func pathsEqual(a, b string) bool { return evict.PathsEqual(a, b) }
 
 // downloadHostAllowed reports whether a download may be fetched from a host.
 //

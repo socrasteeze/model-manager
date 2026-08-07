@@ -46,8 +46,10 @@ import {
   type Root,
   type ScanJob,
 } from '../api'
+import { ArchivePanel } from './ArchivePanel'
 import { EnrichRunner } from './EnrichRunner'
 import { ToggleRow } from './ToggleRow'
+import { UpstreamCard } from './UpstreamCard'
 
 /**
  * Reads a setting that may be either a bare value ("use this for everything")
@@ -435,6 +437,10 @@ export function SettingsPanel({ hidden, onLibraryChanged, onPreferenceChanged }:
           </button>
         </div>
       </section>
+
+      <UpstreamCard />
+
+      {config.archiveAvailable && <ArchivePanel />}
 
       <section className="settings-block">
         <h2>Metadata and thumbnails from the origin</h2>

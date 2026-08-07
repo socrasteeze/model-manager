@@ -306,6 +306,271 @@ func TestOnCompleteErrorRecorded(t *testing.T) {
 	}
 }
 
+// rangeServer serves content in two halves and records the conditional headers
+// each request carried, so a test can assert what was sent as well as what came
+// back.
+type rangeServer struct {
+	body       []byte
+	etag       string
+	mu         sync.Mutex
+	ifRanges   []string // one entry per request, "" when the header was absent
+	rangeSeen  []string
+	cutAtFirst int // bytes to send before hanging up on the first request
+}
+
+func (rs *rangeServer) handler(w http.ResponseWriter, r *http.Request) {
+	rs.mu.Lock()
+	n := len(rs.ifRanges)
+	rs.ifRanges = append(rs.ifRanges, r.Header.Get("If-Range"))
+	rs.rangeSeen = append(rs.rangeSeen, r.Header.Get("Range"))
+	rs.mu.Unlock()
+
+	if rs.etag != "" {
+		w.Header().Set("ETag", rs.etag)
+	}
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	start := 0
+	if rng := r.Header.Get("Range"); rng != "" {
+		fmt.Sscanf(rng, "bytes=%d-", &start)
+		if start > 0 && start <= len(rs.body) {
+			w.Header().Set("Content-Range",
+				fmt.Sprintf("bytes %d-%d/%d", start, len(rs.body)-1, len(rs.body)))
+			w.WriteHeader(http.StatusPartialContent)
+		}
+	}
+	remaining := rs.body[start:]
+	if n == 0 && rs.cutAtFirst > 0 && rs.cutAtFirst < len(remaining) {
+		// Half a body and then a hangup, which is what a dropped connection
+		// looks like to the client -- a clean short write would read as a
+		// complete (if wrong-sized) response and never trigger a resume.
+		w.Write(remaining[:rs.cutAtFirst])
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				conn.Close()
+			}
+		}
+		return
+	}
+	w.Write(remaining)
+}
+
+func (rs *rangeServer) conditionals() []string {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return append([]string(nil), rs.ifRanges...)
+}
+
+// A resume must carry the validator the server itself gave us, so the server can
+// answer "that is stale" instead of splicing the tail of a new representation
+// onto the head of an old one.
+func TestResumeReplaysTheServersOwnValidator(t *testing.T) {
+	rs := &rangeServer{body: []byte(strings.Repeat("abcdefgh", 512)),
+		etag: `"v1-strong"`, cutAtFirst: 1000}
+	srv := httptest.NewServer(http.HandlerFunc(rs.handler))
+	defer srv.Close()
+
+	m := newManager(t)
+	m.MaxRetries = 3
+	defer func(prev bool) { backoffTestHook = prev }(backoffTestHook)
+	backoffTestHook = true
+
+	dest := t.TempDir()
+	job, err := m.Fetch(context.Background(), Job{
+		URL: srv.URL + "/m.safetensors", DestDir: dest, Filename: "m.safetensors",
+		ExpectedSize: int64(len(rs.body)),
+	})
+	if err != nil {
+		t.Fatalf("fetch: %v (state %s)", err, job.State)
+	}
+
+	conds := rs.conditionals()
+	if len(conds) < 2 {
+		t.Fatalf("expected a resume; requests = %d", len(conds))
+	}
+	if conds[0] != "" {
+		t.Errorf("the first request carried If-Range %q; nothing had been validated yet", conds[0])
+	}
+	if conds[1] != `"v1-strong"` {
+		t.Errorf("resume sent If-Range %q, want the server's own ETag", conds[1])
+	}
+
+	got, err := os.ReadFile(filepath.Join(dest, "m.safetensors"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(rs.body) {
+		t.Errorf("resumed file is %d bytes, want %d", len(got), len(rs.body))
+	}
+}
+
+// The regression guard for the version of this that was proposed and rejected:
+// sending our own expected sha256 as If-Range to a public provider.
+//
+// A provider's ETag is a CDN entity tag that can never equal our hash, so the
+// mismatch is guaranteed. RFC 7233 then requires a 200 with the whole body, and
+// the 200 branch truncates the partial -- so every resume would restart from
+// zero and a large transfer over a flaky link could never finish. No invented
+// validator is better than a wrong one.
+func TestResumeSendsNoInventedValidatorToAPublicProvider(t *testing.T) {
+	rs := &rangeServer{body: []byte(strings.Repeat("x", 4096)), cutAtFirst: 500}
+	srv := httptest.NewServer(http.HandlerFunc(rs.handler))
+	defer srv.Close()
+
+	m := newManager(t)
+	m.MaxRetries = 2
+	defer func(prev bool) { backoffTestHook = prev }(backoffTestHook)
+	backoffTestHook = true
+
+	// An ordinary download: an expected hash, but no upstream. This is the exact
+	// shape the rejected design would have sent a sha-based If-Range for.
+	job, err := m.Fetch(context.Background(), Job{
+		URL: srv.URL + "/m.safetensors", DestDir: t.TempDir(), Filename: "m.safetensors",
+		ExpectedSHA256: strings.Repeat("a", 64),
+	})
+	if err == nil {
+		// The hash will not match; that is fine and not what this asserts.
+		_ = job
+	}
+
+	conds := rs.conditionals()
+	if len(conds) < 2 {
+		t.Fatalf("no resume happened, so this asserts nothing; requests = %d", len(conds))
+	}
+	for i, c := range conds {
+		if c != "" {
+			t.Fatalf("request %d carried If-Range %q; a hash we invented is not this server's validator", i, c)
+		}
+	}
+	// And the resume did append rather than restart, which is the property the
+	// rejected design would have destroyed.
+	if rs.rangeSeen[1] == "" {
+		t.Error("the resume sent no Range header")
+	}
+}
+
+// The one case where a validator is knowable without having seen a response: our
+// own file endpoint sets its ETag to the content hash. This is what covers a
+// resume on the first attempt after a daemon restart, where nothing was captured
+// because the in-memory job did not survive.
+func TestResumeUsesTheContentHashOnlyForAnUpstream(t *testing.T) {
+	m := newManager(t)
+
+	upstream := Job{ID: "j1", UpstreamBase: "http://hub:8737", ExpectedSHA256: "ABCDEF"}
+	public := Job{ID: "j2", ExpectedSHA256: "ABCDEF"}
+	captured := Job{ID: "j3", UpstreamBase: "http://hub:8737", ExpectedSHA256: "ABCDEF",
+		Validator: `"from-the-server"`}
+	for _, j := range []Job{upstream, public, captured} {
+		job := j
+		m.jobs[job.ID] = &job
+	}
+
+	if got := m.ifRange("j1"); got != `"abcdef"` {
+		t.Errorf("upstream job sent %q, want the lower-cased content hash", got)
+	}
+	if got := m.ifRange("j2"); got != "" {
+		t.Errorf("public job sent %q, want nothing", got)
+	}
+	if got := m.ifRange("j3"); got != `"from-the-server"` {
+		t.Errorf("captured validator was overridden by the fallback: %q", got)
+	}
+	if got := m.ifRange("nope"); got != "" {
+		t.Errorf("unknown job sent %q", got)
+	}
+}
+
+// A weak ETag must never be replayed: weak comparison says two representations
+// are equivalent, not byte-identical, and byte-identity is the only thing that
+// makes appending to a partial safe.
+func TestStrongValidatorRejectsWeakETags(t *testing.T) {
+	cases := []struct {
+		etag, lastMod, want string
+	}{
+		{`"strong"`, "", `"strong"`},
+		{`W/"weak"`, "", ""},
+		{`W/"weak"`, "Wed, 21 Oct 2026 07:28:00 GMT", "Wed, 21 Oct 2026 07:28:00 GMT"},
+		{"", "Wed, 21 Oct 2026 07:28:00 GMT", "Wed, 21 Oct 2026 07:28:00 GMT"},
+		{"", "", ""},
+	}
+	for _, tc := range cases {
+		resp := &http.Response{Header: http.Header{}}
+		if tc.etag != "" {
+			resp.Header.Set("ETag", tc.etag)
+		}
+		if tc.lastMod != "" {
+			resp.Header.Set("Last-Modified", tc.lastMod)
+		}
+		if got := strongValidator(resp); got != tc.want {
+			t.Errorf("ETag %q / Last-Modified %q -> %q, want %q",
+				tc.etag, tc.lastMod, got, tc.want)
+		}
+	}
+}
+
+// TestAfterCompleteIsSeparateFromIndexing pins the reason there are two hooks
+// rather than one. An indexing failure means the file is not in the library and
+// a rescan is the fix; a carry-over failure means it is in the library with
+// thinner metadata, which a rescan cannot help. Reporting the second through
+// IndexError would give the user advice that cannot work.
+func TestAfterCompleteIsSeparateFromIndexing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("fine"))
+	}))
+	defer srv.Close()
+
+	m := newManager(t)
+	m.OnComplete = func(j Job) string { return "" }
+	m.AfterComplete = func(j Job) string { return "metadata did not come across" }
+
+	job, err := m.Fetch(context.Background(), Job{URL: srv.URL + "/g.bin", DestDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, _ := m.Job(job.ID)
+	if final.State != StateComplete {
+		t.Fatalf("state = %s", final.State)
+	}
+	if final.MetaError != "metadata did not come across" {
+		t.Errorf("MetaError = %q, want the hook's message", final.MetaError)
+	}
+	if final.IndexError != "" {
+		t.Errorf("IndexError = %q, want it left alone", final.IndexError)
+	}
+}
+
+// A failed index means there is no local record to hang carried metadata on, so
+// the second hook must not run at all -- and must certainly not overwrite the
+// indexing failure with a downstream symptom of it.
+func TestAfterCompleteSkippedWhenIndexingFailed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("fine"))
+	}))
+	defer srv.Close()
+
+	ran := false
+	m := newManager(t)
+	m.OnComplete = func(j Job) string { return "boom" }
+	m.AfterComplete = func(j Job) string { ran = true; return "should not appear" }
+
+	job, err := m.Fetch(context.Background(), Job{URL: srv.URL + "/g.bin", DestDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran {
+		t.Error("AfterComplete ran despite a failed index")
+	}
+	final, _ := m.Job(job.ID)
+	if final.IndexError != "boom" {
+		t.Errorf("IndexError = %q", final.IndexError)
+	}
+	if final.MetaError != "" {
+		t.Errorf("MetaError = %q, want empty", final.MetaError)
+	}
+}
+
 // TestJobsSortedByStartedAt: map iteration order must not reach the API.
 func TestJobsSortedByStartedAt(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

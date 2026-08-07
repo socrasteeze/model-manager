@@ -18,6 +18,7 @@ package store
 // why a stored flag was rejected.
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -205,6 +206,73 @@ func (s *Store) MarkOriginModelChecked(provider, modelID string, httpStatus int,
 	})
 }
 
+// MarkOriginModelGone records that a provider has stopped serving a model.
+//
+// Idempotent by only writing when currently NULL, so it records when the model
+// was FIRST seen gone rather than when it was last confirmed. The same
+// never-retract rule PutOriginModelStatus follows: every latest_* column is left
+// alone, because a model removed upstream may still have had a newer version
+// published before it went, and blanking a known answer would clear a correct
+// badge.
+func (s *Store) MarkOriginModelGone(provider, modelID string) error {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+
+	// The status row may not exist yet -- a model 404'd on its very first check
+	// has never been recorded. Insert with the stamp, or set it if unset.
+	_, err := s.db.Exec(`
+        INSERT INTO origin_model_status (provider, origin_model_id, checked_at, http_status, upstream_gone_at)
+        VALUES (?, ?, ?, 404, ?)
+        ON CONFLICT(provider, origin_model_id) DO UPDATE SET
+            upstream_gone_at = COALESCE(origin_model_status.upstream_gone_at, excluded.upstream_gone_at)`,
+		provider, modelID, nowUTC(), nowUTC())
+	if err != nil {
+		return fmt.Errorf("store: marking %s/%s gone: %w", provider, modelID, err)
+	}
+	return nil
+}
+
+// SHAsForOriginModel lists the local files published as one upstream model.
+//
+// The inverse of the identity table's usual direction. Needed when something
+// happens to a remote model -- a takedown, most usefully -- and the question
+// becomes which local files that fact is about.
+func (s *Store) SHAsForOriginModel(provider, modelID string) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT sha256 FROM model_origin
+          WHERE provider = ? AND origin_model_id = ? ORDER BY sha256`,
+		provider, modelID)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing files for %s/%s: %w", provider, modelID, err)
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return nil, err
+		}
+		out = append(out, sha)
+	}
+	return out, rows.Err()
+}
+
+// OriginModelGone reports whether a model is recorded as removed upstream.
+func (s *Store) OriginModelGone(provider, modelID string) (bool, error) {
+	var gone sql.NullString
+	err := s.db.QueryRow(
+		`SELECT upstream_gone_at FROM origin_model_status
+          WHERE provider = ? AND origin_model_id = ?`, provider, modelID).Scan(&gone)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return gone.Valid && gone.String != "", nil
+}
+
 // OwnedModel is one upstream model the library holds a version of.
 type OwnedModel struct {
 	Provider        string
@@ -222,7 +290,15 @@ type OwnedModel struct {
 // ordering by when we last asked is strictly better now that it is recorded.)
 //
 // maxAge skips models checked more recently than that. Zero checks everything.
-func (s *Store) OwnedOriginModels(provider string, maxAge time.Duration, limit int) ([]OwnedModel, error) {
+//
+// recheckGone re-queues models the provider has stopped serving. Off is the
+// right default, and the reason is arithmetic: a 404 only advances checked_at,
+// and maxAge defaults to zero so checked_at is not consulted either -- so
+// without this filter a model taken down once is re-asked on every sweep for the
+// life of the library. On a library that has outlived a few takedowns, that is
+// the slowest part of every sweep, spent re-confirming something that will not
+// change. Turning it on is how an operator asks "did any of them come back".
+func (s *Store) OwnedOriginModels(provider string, maxAge time.Duration, limit int, recheckGone bool) ([]OwnedModel, error) {
 	args := []any{provider}
 	cutoff := ""
 	if maxAge > 0 {
@@ -242,6 +318,9 @@ func (s *Store) OwnedOriginModels(provider string, maxAge time.Duration, limit i
 	if cutoff != "" {
 		query += ` AND COALESCE(s.checked_at, '') < ?`
 		args = append(args, cutoff)
+	}
+	if !recheckGone {
+		query += ` AND s.upstream_gone_at IS NULL`
 	}
 	query += `
          GROUP BY mo.origin_model_id

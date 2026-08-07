@@ -54,6 +54,32 @@ type Client struct {
 	HuggingFaceBase string
 	CivArchiveBase  string
 
+	// UpstreamBase is another model-manager daemon holding the master library --
+	// typically the NAS. Its presence is what enables the upstream provider, so
+	// an unset value means "no upstream" rather than "use a default".
+	//
+	// Read from the environment rather than the setting table, and not only for
+	// the reason the credentials rule gives. imageHostAllowed widens for
+	// ConfiguredHosts(), and downloadHostAllowed is that same function, so a base
+	// URL the API could write would make PUT /api/settings followed by
+	// POST /api/downloads into "fetch an arbitrary URL and write it into a model
+	// root" -- the exact primitive downloads.go exists to deny. Reading it once at
+	// process start makes the allowlist immutable for the daemon's lifetime.
+	UpstreamBase string
+
+	// UpstreamToken is the upstream's bearer token, required whenever that daemon
+	// is bound off-loopback. Host-scoped like every other credential here.
+	UpstreamToken string
+
+	// UpstreamName is a display label only. Empty falls back to the host.
+	UpstreamName string
+
+	// NoThirdParty suppresses the three public providers without suppressing the
+	// upstream. Set from --no-remote, which means "do not contact third parties";
+	// a NAS the operator configured themselves is not one, the same distinction
+	// serve.go already draws for a ComfyUI address.
+	NoThirdParty bool
+
 	// MinInterval throttles requests. 19k lookups against a public API is a
 	// volume that gets an IP blocked if it arrives all at once (spec §12).
 	MinInterval time.Duration
@@ -89,7 +115,32 @@ func NewClient() *Client {
 		CivitaiBase:     os.Getenv("MM_CIVITAI_API"),
 		HuggingFaceBase: os.Getenv("MM_HUGGINGFACE_API"),
 		CivArchiveBase:  os.Getenv("MM_CIVARCHIVE_API"),
+		UpstreamBase:    os.Getenv("MM_UPSTREAM_URL"),
+		UpstreamToken:   os.Getenv("MM_UPSTREAM_TOKEN"),
+		UpstreamName:    os.Getenv("MM_UPSTREAM_NAME"),
 	}
+}
+
+// defaultHTTPClient backs a zero-value Client.
+//
+// Bounded, and deliberately not http.DefaultClient. A zero-value Client is a
+// perfectly reasonable thing to write -- &origin.Client{UpstreamBase: url} is
+// what a caller wanting only an upstream would reach for -- and it used to
+// dereference a nil HTTP field. That is not merely a test annoyance: the
+// download manager runs its transfers on a bare goroutine, where a panic takes
+// the process down rather than one request.
+//
+// Defaulting to the unbounded shared client would trade an immediate crash for
+// an unbounded hang, which is the worse of the two: a panic says where the bug
+// is, and a request that never returns says nothing while holding a connection
+// open forever. 30 seconds is what NewClient already sets.
+var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
+func (c *Client) httpClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return defaultHTTPClient
 }
 
 // civitaiBase resolves the Civitai API root for this client.
@@ -105,6 +156,29 @@ func (c *Client) huggingFaceBase() string {
 // civArchiveBase resolves the CivArchive API root for this client.
 func (c *Client) civArchiveBase() string {
 	return strings.TrimRight(orDefaultStr(c.CivArchiveBase, CivArchiveBaseURL), "/")
+}
+
+// upstreamBase resolves the upstream daemon's root, or "" when none is set.
+//
+// No package-level default, unlike the three providers above: there is no such
+// thing as a well-known upstream, and defaulting one would silently point the
+// allowlist and the download URL at a host nobody chose.
+func (c *Client) upstreamBase() string {
+	return strings.TrimRight(strings.TrimSpace(c.UpstreamBase), "/")
+}
+
+// HasUpstream reports whether an upstream library is configured.
+func (c *Client) HasUpstream() bool { return c.upstreamBase() != "" }
+
+// UpstreamLabel is what a human sees in a provider tab.
+func (c *Client) UpstreamLabel() string {
+	if name := strings.TrimSpace(c.UpstreamName); name != "" {
+		return name
+	}
+	if host := hostOf(c.upstreamBase()); host != "" {
+		return host
+	}
+	return "Upstream"
 }
 
 func orDefaultStr(v, fallback string) string {
@@ -177,11 +251,32 @@ func (c *Client) LookupCivitaiByHash(ctx context.Context, sha256 string) (json.R
 
 // getJSON performs a throttled, retried GET.
 func (c *Client) getJSON(ctx context.Context, url string) (json.RawMessage, int, error) {
+	return c.get(ctx, url, true)
+}
+
+// getUpstreamJSON performs a retried GET without the shared throttle.
+//
+// The throttle exists to keep a public API from blocking this IP, and one Client
+// is deliberately shared by browse, enrich and update sweeps so they queue behind
+// a single request budget (see serve.go). An upstream daemon on the LAN is not a
+// third party to be polite to, and routing it through the same lock would put
+// interactive browsing of the user's own library behind a running Civitai sweep --
+// throttle() holds its mutex across the sleep, so that queue is real.
+//
+// Everything else about the request is identical: retries, host-scoped
+// credentials, the read cap and the ErrRateLimited typing all still apply.
+func (c *Client) getUpstreamJSON(ctx context.Context, url string) (json.RawMessage, int, error) {
+	return c.get(ctx, url, false)
+}
+
+func (c *Client) get(ctx context.Context, url string, throttled bool) (json.RawMessage, int, error) {
 	var lastStatus int
 
 	for attempt := 0; attempt <= c.MaxRetries; attempt++ {
-		if err := c.throttle(ctx); err != nil {
-			return nil, 0, err
+		if throttled {
+			if err := c.throttle(ctx); err != nil {
+				return nil, 0, err
+			}
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -195,7 +290,7 @@ func (c *Client) getJSON(ctx context.Context, url string) (json.RawMessage, int,
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 
-		resp, err := c.HTTP.Do(req)
+		resp, err := c.httpClient().Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, 0, ctx.Err()

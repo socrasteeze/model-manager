@@ -136,6 +136,88 @@ func TestCredentialsAreHostScoped(t *testing.T) {
 	}
 }
 
+// TestUpstreamCredentialIsScopedAndOrderedFirst pins the two properties that
+// keep an upstream from becoming a credential leak in either direction: the
+// upstream's own token is the only one it ever receives, and no third party
+// receives the upstream's token.
+//
+// The ordering half is not hypothetical. TokenFor matches on host, so pointing
+// MM_CIVITAI_API at the upstream host -- a plausible mistake when testing
+// against a mirror -- would otherwise hand the Civitai key to a machine on the
+// LAN. Putting the upstream case first makes the worst outcome an
+// unauthenticated Civitai request instead.
+func TestUpstreamCredentialIsScopedAndOrderedFirst(t *testing.T) {
+	c := testClient()
+	c.CivitaiBase = "https://civitai.com/api/v1"
+	c.HuggingFaceBase = "https://huggingface.co/api"
+	c.APIKey = "civitai-secret"
+	c.HFToken = "hf-secret"
+	c.UpstreamBase = "http://nas.example:8737"
+	c.UpstreamToken = "upstream-secret"
+
+	cases := []struct {
+		url  string
+		want string
+	}{
+		{"http://nas.example:8737/api/models", "upstream-secret"},
+		{"http://nas.example:8737/api/models/abc/file", "upstream-secret"},
+		{"https://civitai.com/api/v1/models", "civitai-secret"},
+		{"https://huggingface.co/api/models", "hf-secret"},
+		{"https://cdn-lfs.huggingface.co/x", "hf-secret"},
+		// A different port on the same machine is a different service.
+		{"http://nas.example:9999/api/models", ""},
+		{"http://nas.example/api/models", ""},
+		{"https://evil.test/steal", ""},
+	}
+	for _, tc := range cases {
+		if got := c.TokenFor(tc.url); got != tc.want {
+			t.Errorf("TokenFor(%q) = %q, want %q", tc.url, got, tc.want)
+		}
+	}
+
+	// The ordering guarantee, stated as its own case so a reordered switch fails
+	// here with an explanation rather than somewhere downstream.
+	misconfigured := testClient()
+	misconfigured.APIKey = "civitai-secret"
+	misconfigured.UpstreamBase = "http://nas.example:8737"
+	misconfigured.UpstreamToken = "upstream-secret"
+	misconfigured.CivitaiBase = "http://nas.example:8737/api/v1"
+	if got := misconfigured.TokenFor("http://nas.example:8737/api/models"); got == "civitai-secret" {
+		t.Fatal("civitai key leaked to the upstream host; the upstream case must come first in TokenFor")
+	}
+}
+
+// TestConfiguredHostsIncludesUpstream pins the allowlist widening at its source.
+// The daemon's image proxy and its download host check both read this list, so a
+// missing entry here is a 403 on every pull and a 502 on every NAS thumbnail --
+// and an over-broad entry here is the SSRF the check exists to prevent.
+func TestConfiguredHostsIncludesUpstream(t *testing.T) {
+	c := testClient()
+	c.UpstreamBase = "http://nas.example:8737/"
+
+	var found bool
+	for _, h := range c.ConfiguredHosts() {
+		if h == "nas.example:8737" {
+			found = true
+		}
+		if h == "nas.example" {
+			t.Error("upstream host listed without its port; the entry must be host:port")
+		}
+	}
+	if !found {
+		t.Errorf("upstream host missing from %v", c.ConfiguredHosts())
+	}
+
+	// No upstream configured means no extra host, so a daemon that never opts in
+	// keeps exactly the allowlist it had before this existed.
+	plain := testClient()
+	for _, h := range plain.ConfiguredHosts() {
+		if h == "" || h == "nas.example:8737" {
+			t.Errorf("unconfigured client widened the allowlist with %q", h)
+		}
+	}
+}
+
 func TestHostMatchIsExact(t *testing.T) {
 	// A suffix match would treat a lookalike domain as HuggingFace and hand it
 	// the token.

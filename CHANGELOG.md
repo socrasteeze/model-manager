@@ -5,6 +5,76 @@ list internal refactors with no visible effect.
 
 Every entry links to the full release notes for that version.
 
+## [Unreleased]
+
+### Added
+
+- Upstream libraries. Point one Model Manager at another with `MM_UPSTREAM_URL`
+  and it appears in Browse beside Civitai, CivArchive and HuggingFace. This is
+  how a laptop reaches a collection that lives on a NAS.
+- Pulling a model from an upstream onto the local machine. It lands in the right
+  per-type folder for whichever tool owns that directory, is verified against the
+  hash the upstream indexed it under, and is indexed on arrival, exactly like a
+  download from a provider.
+- A pulled model brings the upstream's metadata with it: name, base model,
+  trigger words, tags, previews, the training record, and the provenance behind
+  them. A value corrected by hand on the upstream stays a manual value here, so a
+  later metadata refresh cannot overwrite it. Only the upstream needs a provider
+  API key.
+- `--serve-files` on the machine holding the library, which lets other machines
+  download indexed model files from it. Off by default. Transfers support resume.
+- Evicting a pulled copy to reclaim space, behind `--allow-evict`. The file is
+  removed; everything the library knows about it — name, tags, previews,
+  provenance, your own edits — is kept, and the model stays listed as available
+  from the upstream. Refused for any file that was not pulled, and for any model a
+  generated view still links to, where the delete would have freed nothing.
+- A Settings panel reporting whether the upstream is configured, reachable,
+  accepting our credentials, and serving files, since those fail separately.
+
+- Archiving a model from a provider, behind `--allow-archive`. It keeps the file,
+  the provider's raw responses, every metadata candidate and every preview, so a
+  model taken down later is still fully here. Intake is per model and deliberate;
+  nothing is crawled.
+- A watchlist. Watched models are checked for new versions on a timer
+  (`--archive-interval`, six hours by default, `0` to check only on request).
+  Fetching a new version automatically is off by default: a watch subscribes to
+  information, not to unattended multi-gigabyte downloads.
+- The archive records how complete each capture is, part by part, so a partial
+  one says which part is missing and can be finished by re-running — that only
+  fetches the gaps.
+- A model the provider has removed is marked as gone and stops being re-checked,
+  and its record is shown as the surviving copy. Before this, a model that 404'd
+  once was re-asked on every update check for the life of the library.
+- Downloads now check free space before starting. A transfer that cannot fit is
+  refused in the first second with both numbers, instead of filling the disk and
+  leaving a partial file behind. Both filesystems are checked: a download is
+  staged beside the database and only then moved to the model root, so on the
+  usual setup it needs room in two places at once.
+
+### Fixed
+
+- Preview images from a source that requires a bearer token failed to load. The
+  image proxy sent no credential, which no public provider needed and an upstream
+  library does.
+- A model pulled into two model directories could never be evicted. The second
+  pull replaced the record of the first, so the first copy no longer matched any
+  record and was refused with a message saying it had not been pulled. Each copy
+  is now recorded and evicted on its own.
+- Evicting a model while it was being downloaded is now refused, naming the
+  transfer, instead of deleting a file something was still writing.
+- Resuming an interrupted download now tells the server which version of the file
+  it already has. A file that changed mid-transfer restarts cleanly instead of
+  producing a mixture of the old and new copies that only fails at the end.
+- Starting an enrichment run while an update check was running is now refused, as
+  the reverse already was. Both talk to the same provider on one shared rate
+  limit, and running them together was how that limit got hit.
+- Browse now says when a provider could not be reached for file details, instead
+  of showing those results as "new". A model you already own could be listed as
+  new during an outage, which invited downloading it again.
+- An enrichment run now reports how many preview images failed, separately from
+  models that failed. A run with no network reported zero images and no errors,
+  which read as a library whose models simply have no previews.
+
 ## [v0.4.2](docs/release-notes/v0.4.2.md) — 2026-08-05
 
 ### Fixed

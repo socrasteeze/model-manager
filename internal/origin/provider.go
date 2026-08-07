@@ -25,6 +25,11 @@ const (
 	ProviderCivitaiID     = "civitai"
 	ProviderCivArchiveID  = "civarchive"
 	ProviderHuggingFaceID = "huggingface"
+
+	// ProviderUpstreamID is another model-manager holding the master library.
+	// Unlike the three above it is not a public index, so it exists only when
+	// the operator has named one.
+	ProviderUpstreamID = "upstream"
 )
 
 // Provider is a remote index that can be searched and downloaded from.
@@ -210,6 +215,20 @@ type LocalMatch struct {
 	// Path is one local path for that file, for display.
 	Path string `json:"path,omitempty"`
 
+	// Resident reports whether the matched file is actually on disk.
+	//
+	// The local index deliberately holds owned hashes with no present path --
+	// "still owned, just not mounted", so an unplugged drive does not prompt a
+	// re-download of the whole library. Eviction makes that distinction visible
+	// for the first time: a model deliberately removed to reclaim space is
+	// owned and *should* be re-fetchable, and reporting it as plain "have"
+	// leaves the user with no way to get it back.
+	//
+	// No omitempty: false is the interesting value, and dropping it would make
+	// "not on disk" indistinguishable from "an older daemon that never said".
+	// The client needs to tell those apart to decide whether to offer a re-pull.
+	Resident bool `json:"resident"`
+
 	// HaveVersionID is the version of this model already held, set when Status
 	// is MatchOutdated.
 	HaveVersionID   string `json:"have_version_id,omitempty"`
@@ -278,18 +297,34 @@ type Registry struct {
 
 // NewRegistry builds a registry for the given client.
 //
-// All three are always constructed. A provider that cannot be reached fails at
-// search time with an error naming it, which is a better failure than silently
-// omitting a source the user asked to search.
+// The three public providers are always constructed when they are in play at
+// all. A provider that cannot be *reached* fails at search time with an error
+// naming it, which is a better failure than silently omitting a source the user
+// asked to search -- that rule is about unreachability, and it still holds.
+//
+// Configuration is a different question, and both switches here answer it before
+// search rather than during it. An upstream nobody has named has no URL to fail
+// against, so registering it would produce an error on every search that says
+// only that the user has not opted into a feature. And --no-remote means the
+// operator has said not to contact third parties, so those three are absent by
+// instruction rather than by failure; the upstream survives that flag, because a
+// machine the operator configured themselves is not a third party.
 func NewRegistry(c *Client) *Registry {
 	if c == nil {
 		c = NewClient()
 	}
-	return &Registry{providers: []Provider{
-		&CivitaiProvider{Client: c},
-		&CivArchiveProvider{Client: c},
-		&HuggingFaceProvider{Client: c},
-	}}
+	var providers []Provider
+	if !c.NoThirdParty {
+		providers = append(providers,
+			&CivitaiProvider{Client: c},
+			&CivArchiveProvider{Client: c},
+			&HuggingFaceProvider{Client: c},
+		)
+	}
+	if c.HasUpstream() {
+		providers = append(providers, &UpstreamProvider{Client: c})
+	}
+	return &Registry{providers: providers}
 }
 
 // All returns every registered provider.
@@ -360,7 +395,15 @@ func (r *Registry) SearchAll(ctx context.Context, ids []string, q Query) ([]List
 // Costs one request per listing, so it is capped and skipped for providers that
 // already supplied hashes. Listings are resolved in order, and a failure leaves
 // that listing's files as they were rather than aborting the batch.
-func (r *Registry) ResolveFiles(ctx context.Context, items []Listing, max int) {
+// Returns the first failure per provider.
+//
+// Errors used to be swallowed, which turned an outage into a wrong answer stated
+// confidently: without hashes every HuggingFace listing renders as "new" even
+// when the file is already on disk, prompting exactly the duplicate download
+// this project exists to prevent. A caller that shows nothing is better served
+// knowing why than being handed a page that looks complete and is not.
+func (r *Registry) ResolveFiles(ctx context.Context, items []Listing, max int) map[string]error {
+	errs := map[string]error{}
 	if max <= 0 {
 		max = 25
 	}
@@ -375,7 +418,7 @@ func (r *Registry) ResolveFiles(ctx context.Context, items []Listing, max int) {
 	spent := 0
 	for i := range items {
 		if spent >= max || ctx.Err() != nil {
-			return
+			return errs
 		}
 		if hasAnyHash(items[i]) {
 			continue
@@ -387,6 +430,12 @@ func (r *Registry) ResolveFiles(ctx context.Context, items []Listing, max int) {
 		before := len(items[i].Files)
 		files, err := p.Files(ctx, items[i])
 		if err != nil {
+			// First failure per provider, not every one: a page of thirty
+			// hashless listings from one unreachable host would otherwise
+			// produce thirty copies of the same sentence.
+			if _, seen := errs[items[i].Provider]; !seen {
+				errs[items[i].Provider] = err
+			}
 			spent++
 			continue
 		}
@@ -399,6 +448,7 @@ func (r *Registry) ResolveFiles(ctx context.Context, items []Listing, max int) {
 			spent++
 		}
 	}
+	return errs
 }
 
 func hasHashIn(files []RemoteFile) bool {
