@@ -1,0 +1,11 @@
+# The built UI bundle is committed, and the release workflow compares a fresh
+# build against it byte for byte to catch a stale interface shipping silently.
+#
+# Line-ending normalization breaks that comparison. Vite writes LF on every
+# platform, but a Windows checkout with core.autocrlf=true rewrites these files
+# to CRLF, so the same bytes report as modified locally and the drift check
+# stops meaning what it says -- either failing a good release or, worse, being
+# routinely ignored until it misses a real one.
+#
+# Treated as binary so what is stored is what is compared, everywhere.
+internal/webui/dist/** -text

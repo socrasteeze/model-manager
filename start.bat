@@ -41,6 +41,20 @@ rem this only decides what a search can return. Example:
 rem
 rem     set "MM_CIVITAI_API=https://civitai.red/api/v1"
 
+rem Another Model Manager holding the main collection -- usually the machine the
+rem library lives on. Setting this makes it searchable in Browse alongside the
+rem public providers, and lets you pull models from it onto this machine.
+rem
+rem The token is that daemon's api-token file, needed whenever it is reachable
+rem from anywhere but its own loopback. Prefer setx over writing it here:
+rem
+rem     setx MM_UPSTREAM_URL "http://library:8737"
+rem     setx MM_UPSTREAM_TOKEN "the-token-from-its-api-token-file"
+rem     setx MM_UPSTREAM_NAME "Library"
+rem
+rem That machine also needs to be started with --serve-files before it will hand
+rem any model files over.
+
 rem ------------------------------------------------------- locate the binary
 
 cd /d "%~dp0"

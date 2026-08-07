@@ -46,9 +46,11 @@ and what that measurably costs.
 
 ## Install
 
-**Current release: [v0.4.2](../../releases/tag/v0.4.2)** — makes the per-type
-download folder fields in Settings typable again. See its
-[release notes](docs/release-notes/v0.4.2.md); nothing needs running by hand.
+**Current release: [v0.5.0](../../releases/tag/v0.5.0)** — one library, several
+machines: a second copy can browse and pull from the first, reclaim the space
+again afterwards, and the machine holding the collection can archive from the
+providers well enough to outlive them. See its
+[release notes](docs/release-notes/v0.5.0.md); nothing needs running by hand.
 
 Download the binary for your platform from the
 [latest release](../../releases/latest) — one file, nothing to install. Windows
