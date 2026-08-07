@@ -30,7 +30,9 @@ if not defined MM_NAS_HOST (
     exit /b 1
 )
 
-set "NAS_PATH=~/model-manager/nas-update.sh"
+rem Matches APP_DIR's default. Deliberately not ~/model-manager, which is where
+rem a working checkout tends to live and which the update wipes.
+set "NAS_PATH=~/model-manager-deploy/nas-update.sh"
 if not "%~1"=="" set "NAS_PATH=%~1"
 
 where ssh >nul 2>&1
