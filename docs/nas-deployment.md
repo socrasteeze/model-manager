@@ -93,8 +93,20 @@ wrong.
 
 ## First run
 
-Open the UI, add `/models` and `/models-archive` under Settings, and scan. Those
-are the container's paths, and they are what the database records.
+Open the UI, add `/models` under Settings, and scan. That is the container's
+path, and it is what the database records.
+
+`ARCHIVE_DIR` mounts a second library at `/models-archive` and is optional.
+Think before pointing it at a directory another tool owns, because **every
+mounted root is somewhere the daemon may write** — a download or an archive
+intake can be sent to any enabled root. A sync tool's versioning folder is the
+trap: what this daemon captures there as a permanent copy, the other tool is
+free to prune on its own schedule. Give the archive a directory of its own.
+
+Indexing such a folder without letting anything write to it is still possible —
+add it, scan once, then disable it in Settings. A disabled root keeps every path
+and record it contributed but drops out of the destination list, which is what
+makes the duplicate report usable on a folder you do not control.
 
 The API token is generated on first start at `$STATE_DIR/api-token`. A token is
 mandatory whenever the daemon is bound anywhere but loopback — anything that can

@@ -58,7 +58,7 @@ fi
 # shellcheck disable=SC1090
 . "$CONF"
 
-for required in MODELS_DIR ARCHIVE_DIR STATE_DIR CONTAINER_USER PORT ALLOW_HOSTS; do
+for required in MODELS_DIR STATE_DIR CONTAINER_USER PORT ALLOW_HOSTS; do
   eval "value=\${$required:-}"
   if [ -z "$value" ]; then
     echo "nas-update: $required is not set in $CONF" >&2
@@ -160,7 +160,23 @@ echo "==> building $APP_NAME:$VERSION"
 # A bind mount whose host path does not exist is created as a directory, which
 # is how a missing state directory turns into a container that starts, works,
 # and loses its database on the next recreate.
-mkdir -p "$STATE_DIR" "$MODELS_DIR" "$ARCHIVE_DIR"
+mkdir -p "$STATE_DIR" "$MODELS_DIR"
+
+# A second library is optional, and deliberately so.
+#
+# Every mounted root is also a place the daemon may write -- a download or an
+# archive intake can be sent to any enabled root. So a directory another tool
+# owns and prunes, a sync tool's versioning folder being the obvious one, must
+# not be mounted here just to be indexed: what this daemon archives there as
+# permanent, the other tool is free to delete.
+#
+# Built with set -- rather than a word-split string so a path containing a
+# space survives.
+set --
+if [ -n "${ARCHIVE_DIR:-}" ]; then
+  mkdir -p "$ARCHIVE_DIR"
+  set -- -v "$ARCHIVE_DIR:$C_ARCHIVE"
+fi
 
 ALLOW_HOST_FLAGS=""
 for h in $ALLOW_HOSTS; do
@@ -197,7 +213,7 @@ echo "==> restarting $APP_NAME"
   --user "$CONTAINER_USER" \
   $ENV_FLAGS \
   -v "$MODELS_DIR":"$C_MODELS" \
-  -v "$ARCHIVE_DIR":"$C_ARCHIVE" \
+  "$@" \
   -v "$STATE_DIR":"$C_STATE" \
   "$APP_NAME:latest" serve \
     --host 0.0.0.0 \
@@ -252,8 +268,11 @@ cat <<EOF
   database   $STATE_DIR/master.db
   api token  $STATE_DIR/api-token
 
-  First run: open the UI, add $C_MODELS and $C_ARCHIVE under Settings, and scan.
-  Those are the container's paths, and they are what the database records.
+  mounted    $C_MODELS${ARCHIVE_DIR:+ and $C_ARCHIVE}
+
+  First run: open the UI, add the mounted path above under Settings, and scan.
+  That is the container's path, and it is what the database records -- so the
+  mount has to stay where it is for the life of the library.
 
   To browse this library from another machine, set there:
     MM_UPSTREAM_URL=http://$(hostname):$HOST_PORT
