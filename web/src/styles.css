@@ -1632,6 +1632,24 @@ select {
 .config-item { min-width: 0; }
 .config-item code { display: block; overflow-wrap: anywhere; }
 .archive-table code { overflow-wrap: anywhere; }
+
+/* The same cause, at every remaining box in the detail panel that is sized by
+   its own content: a flex or inline-flex item defaults to min-width: auto, so
+   its min-content width becomes a floor the container cannot override. All of
+   these carry server strings -- a trigger word, a tag, a suggested value, a
+   hash label, a provenance source, an upstream host name -- and none of them
+   is guaranteed a break opportunity. Measured before this rule, a single
+   unbroken token in any one of them scrolled the panel sideways by 76-130px. */
+.trigger,
+.tag,
+.hash,
+.candidate-entry .src,
+.suggestion code,
+.upstream-status dd {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
 .root-suggestions .chip {
   max-width: 100%;
   overflow-wrap: anywhere;

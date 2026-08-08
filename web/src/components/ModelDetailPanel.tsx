@@ -566,8 +566,15 @@ function trimJSON(encoded: string): string {
   try {
     const v = JSON.parse(encoded)
     const s = Array.isArray(v) ? v.join(', ') : String(v)
-    return s.length > 60 ? `${s.slice(0, 57)}…` : s
+    return cap(s)
   } catch {
-    return encoded
+    // Capped here too. This branch is the one live path by which an uncapped
+    // string reached the page: everything else goes through JSON.parse, so a
+    // value that is not valid JSON was the single case that skipped the limit.
+    return cap(encoded)
   }
+}
+
+function cap(s: string): string {
+  return s.length > 60 ? `${s.slice(0, 57)}…` : s
 }
