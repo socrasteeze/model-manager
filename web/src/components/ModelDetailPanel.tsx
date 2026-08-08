@@ -517,6 +517,7 @@ function TagEditor({
           }}
         >
           <input
+            enterKeyHint="done"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder="Add tag…"

@@ -268,6 +268,8 @@ export function BrowsePanel({ hidden, includeNSFW, grouping }: Props) {
         }}
       >
         <input
+          type="search"
+          enterKeyHint="search"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Search Civitai, CivArchive and HuggingFace…"
@@ -491,7 +493,7 @@ function ListingCard({
           since the start, and browse now matches it. */}
       <div className="listing-thumb">
         {listing.thumbnail_url ? (
-          <img src={remoteImageURL(listing.thumbnail_url)} alt="" loading="lazy" />
+          <img src={remoteImageURL(listing.thumbnail_url)} alt="" loading="lazy" decoding="async" />
         ) : (
           <div className="placeholder" aria-hidden="true">
             {(listing.type || '?').slice(0, 2).toUpperCase()}

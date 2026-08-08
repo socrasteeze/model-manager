@@ -115,6 +115,7 @@ export function ArchivePanel() {
           <input
             type="text"
             inputMode="numeric"
+            enterKeyHint="go"
             placeholder="Civitai model id"
             value={modelID}
             onChange={(e) => setModelID(e.target.value)}

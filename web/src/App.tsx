@@ -32,6 +32,10 @@ import { SettingsPanel } from './components/SettingsPanel'
 
 const PAGE_SIZE = 60
 
+// Ceiling on cards held in the DOM at once. Reaching it by hand takes 15 taps
+// of "Load more"; the point is that no number of taps can walk past it.
+const MAX_RENDERED = 900
+
 export function App() {
   const [filters, setFilters] = useState<Filters>(emptyFilters)
   const [query, setQuery] = useState('')
@@ -129,7 +133,15 @@ export function App() {
       searchModels(filters, nextOffset, PAGE_SIZE, grouping)
         .then((res) => {
           if (id !== requestId.current) return
-          setHits((prev) => (append ? [...prev, ...res.hits] : res.hits))
+          // Capped. Every hit is a card with a decoded image behind it, and
+          // iOS Safari discards a tab that grows too heavy without warning or
+          // a reload prompt -- so an unbounded append is a crash, not a slow
+          // scroll. The cap is well past what anyone reaches by hand (each tap
+          // adds 60) and exists so no sequence of taps can get there.
+          setHits((prev) => {
+            const next = append ? [...prev, ...res.hits] : res.hits
+            return next.length > MAX_RENDERED ? next.slice(-MAX_RENDERED) : next
+          })
           setTotal(res.total)
           setOffset(nextOffset)
           setError(null)
@@ -300,9 +312,17 @@ export function App() {
 
         <main className="results">
           <div className="results-header">
-            <span>
-              {loading && hits.length === 0
-                ? 'Searching…'
+            {/* Not gated on hits.length === 0. Against a library this size a
+                search takes seconds, and gating on an empty grid meant that
+                changing a filter left the previous results and the previous
+                count on screen, unchanged and with nothing pending shown, for
+                the whole wait -- indistinguishable from a tap that missed, and
+                an invitation to tap again. */}
+            <span aria-live="polite">
+              {loading
+                ? hits.length === 0
+                  ? 'Searching…'
+                  : `Searching… (showing ${total.toLocaleString()})`
                 : `${total.toLocaleString()} model${total === 1 ? '' : 's'}`}
             </span>
             <select

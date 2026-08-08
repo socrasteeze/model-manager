@@ -2,7 +2,15 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- interactive-widget tells the browser to shrink the layout when the
+         software keyboard opens rather than overlay it. Safari does not honour
+         it yet, which is why src/keyboard.ts measures visualViewport as well --
+         but declaring it is what makes the behaviour correct on the browsers
+         that do, and harmless on the ones that do not. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <!-- The stylesheet ships a full light palette behind prefers-color-scheme,
          so a single dark theme-color put a near-black status bar above a light
          app. One tag per scheme instead. -->

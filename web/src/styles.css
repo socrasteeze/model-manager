@@ -1736,11 +1736,52 @@ button:active:not(:disabled),
   user-select: none;
 }
 
+/* --- 4. Safe areas, at every width -------------------------------------- */
+
+/* Deliberately not inside a width query. env() resolves to 0 where there is no
+   inset, so max() collapses to the literal padding and these are inert on a
+   desktop -- while a width-scoped version would be wrong in exactly the case
+   that matters most: a Plus or Pro Max in landscape is 932px wide, above any
+   phone breakpoint, and landscape is precisely when the lateral insets are
+   non-zero. Scoping these by width means losing them where they are needed. */
+.detail {
+  padding-top: max(16px, env(safe-area-inset-top));
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
+}
+
+.sidebar {
+  padding-top: max(12px, env(safe-area-inset-top));
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  padding-left: max(12px, env(safe-area-inset-left));
+}
+
+.topbar {
+  padding-left: max(16px, env(safe-area-inset-left));
+  padding-right: max(16px, env(safe-area-inset-right));
+}
+
+/* The scrolling panes and the chip strip, so body content and the chip row's
+   trailing control clear the notch in landscape too. */
+.results,
+.browse,
+.settings,
+.type-chips {
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+}
+
 /* ==========================================================================
-   4. Phones and tablets
+   5. Touch devices and narrow windows
+   --------------------------------------------------------------------------
+   Keyed on the pointer as well as the width. Font size and hit area are
+   properties of the input device, not of the viewport: a 932px landscape
+   phone needs both and a 900px desktop window needs neither. Keying them to
+   width alone put every one of these rules out of reach on exactly the
+   largest iPhones, in the orientation where the layout is already tightest.
    ========================================================================== */
 
-@media (max-width: 900px) {
+@media (pointer: coarse), (max-width: 900px) {
   /* iOS Safari zooms the viewport whenever a control with a computed
      font-size below 16px takes focus, and it never zooms back out. The base
      rule is `font: inherit` against a 14px body, so every control in the app
@@ -1768,30 +1809,6 @@ button:active:not(:disabled),
   .workflow-source select,
   .workflow-source textarea {
     font-size: 16px;
-  }
-
-  /* --- safe areas ------------------------------------------------------- */
-
-  /* Both overlays replace the topbar, which was the only element accounting
-     for the notch. In standalone there is no browser chrome, so without these
-     the detail panel's title and close button sit under the status bar, and
-     the drawer's last controls sit under the home indicator -- where iOS
-     reserves the strip for its own swipe and the taps never arrive. */
-  .detail {
-    padding-top: max(16px, env(safe-area-inset-top));
-    padding-left: max(16px, env(safe-area-inset-left));
-    padding-right: max(16px, env(safe-area-inset-right));
-  }
-
-  .sidebar {
-    padding-top: max(12px, env(safe-area-inset-top));
-    padding-bottom: max(12px, env(safe-area-inset-bottom));
-    padding-left: max(12px, env(safe-area-inset-left));
-  }
-
-  .topbar {
-    padding-left: max(16px, env(safe-area-inset-left));
-    padding-right: max(16px, env(safe-area-inset-right));
   }
 
   /* --- touch targets ---------------------------------------------------- */
@@ -1837,8 +1854,18 @@ button:active:not(:disabled),
 
   .check { padding: 7px 0; }
 
-  /* --- layout ----------------------------------------------------------- */
+}
 
+/* ==========================================================================
+   6. Narrow windows only
+   --------------------------------------------------------------------------
+   Reflowing, as opposed to sizing. These are answers to "there is not enough
+   width", so unlike the block above they key on width alone: a tablet with a
+   coarse pointer at 1024px has room for the table and the two-column grid and
+   should keep them.
+   ========================================================================== */
+
+@media (max-width: 900px) {
   /* A fixed 130px label took 38% of the width and left the value wrapping in a
      column too narrow to read. Stacked, both get the full width. */
   .row {
@@ -1899,4 +1926,136 @@ button:active:not(:disabled),
      more labelled field. */
   .archive-table td:first-child::before { display: none; }
   .archive-table td:first-child { display: block; margin-bottom: 0.3rem; }
+}
+
+/* ==========================================================================
+   7. Remaining iOS platform behaviour
+   ========================================================================== */
+
+/* Safari inflates text on rotation without this. */
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Kills the 300ms double-tap-to-zoom delay on things meant to be tapped, while
+   leaving pinch zoom alone -- the viewport deliberately does not disable it,
+   because suppressing zoom to stop the input-focus jump is an accessibility
+   failure and the 16px rule solves that properly. */
+button,
+a,
+label,
+summary,
+.chip,
+.card,
+[role='button'] {
+  touch-action: manipulation;
+}
+
+/* Hover is a preview of what a click will do. A touch device has no preview
+   state, so :hover latches after the tap and stays: the accent border below is
+   also the "selected" and "owned version" affordance, so a latched hover reads
+   as a selection that was never made. Restated to the base value rather than
+   the whole rule being rewritten, so the desktop styling stays where it is. */
+@media (hover: none) {
+  button:hover:not(:disabled),
+  .root-actions button:hover:not(:disabled),
+  .root-footer button:hover:not(:disabled),
+  .preview-actions button:hover:not(:disabled),
+  .generated-item:hover:not(:disabled),
+  .render-panel > button:hover:not(:disabled),
+  .workflow-actions button:hover:not(:disabled) {
+    border-color: var(--border);
+  }
+
+  .chip-row .chip:hover,
+  .type-chips .chip:hover,
+  .root-suggestions .chip:hover,
+  .family-tabs .chip:hover {
+    color: var(--text-dim);
+    border-color: transparent;
+  }
+
+  .preview-strip figcaption button:hover,
+  .preview-strip figcaption button.danger:hover {
+    color: var(--text-dim);
+  }
+
+  .empty .primary:hover {
+    filter: none;
+  }
+}
+
+/* The drawer slide and the press feedback are the only motion the app has, plus
+   two progress fills. Honour the system setting for all of them. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  button:active:not(:disabled),
+  .chip:active,
+  .card:active {
+    transform: none;
+  }
+}
+
+/* A model filename with no break opportunity, in an unwrapped flex row whose
+   text column could not shrink. The same shape in .listing was fixed and this
+   one was missed, so the whole Browse tab scrolled sideways rather than the
+   row wrapping. */
+.update-row {
+  flex-wrap: wrap;
+}
+
+.update-row > div:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ==========================================================================
+   8. Touch sizing the first pass missed
+   ========================================================================== */
+
+@media (pointer: coarse), (max-width: 900px) {
+  /* The primary filtering controls, and the version picker. Left out of the
+     first pass, which is awkward given the type-chip strip scrolls
+     horizontally: a tap that drags a few pixels scrolls instead of selecting,
+     so a short target is the one that misfires most. */
+  .chip-row .chip,
+  .type-chips .chip,
+  .root-suggestions .chip,
+  .family-tabs .chip,
+  .version-picker .chip {
+    min-height: 40px;
+  }
+
+  .load-more,
+  .copy {
+    min-height: 40px;
+  }
+}
+
+/* ==========================================================================
+   9. The software keyboard
+   ==========================================================================
+   src/keyboard.ts publishes the keyboard height as --kb-inset. The panel is
+   position: fixed, so it cannot be pushed up by the keyboard the way normal
+   flow content is -- it has to be made shorter, after which its own
+   overflow-y scrolls the focused field into the space that remains.
+
+   No transition here on purpose: the keyboard runs its own animation, and a
+   second one on top of it makes the panel visibly lag the keyboard edge. */
+
+.detail {
+  bottom: var(--kb-inset, 0px);
+}
+
+/* While the keyboard is up the panel is short, so the close button matters
+   more, not less -- keep it pinned inside the visible area. */
+.kb-open .detail {
+  padding-bottom: 8px;
 }

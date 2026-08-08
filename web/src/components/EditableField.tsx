@@ -69,6 +69,7 @@ export function EditableField({ label, value, editable, multiline, options, onSa
           <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} autoFocus={autoFocusOnOpen} />
         ) : (
           <input
+            enterKeyHint="done"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {

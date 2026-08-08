@@ -280,6 +280,7 @@ export function SettingsPanel({ hidden, onLibraryChanged, onPreferenceChanged }:
         <div className="root-add">
           <input
             type="text"
+            enterKeyHint="done"
             placeholder="E:\\StabilityMatrix\\Data\\Models"
             value={newPath}
             onChange={(e) => setNewPath(e.target.value)}
@@ -604,7 +605,9 @@ export function SettingsPanel({ hidden, onLibraryChanged, onPreferenceChanged }:
         <label className="setting-row">
           <span>ComfyUI address</span>
           <input
-            type="text"
+            type="url"
+            inputMode="url"
+            enterKeyHint="done"
             placeholder="http://127.0.0.1:8188"
             value={comfyUrl}
             disabled={readOnly}
@@ -923,6 +926,7 @@ function FolderEditor({ root, defaults, map, readOnly, busy, onChange, onReset }
             <span>{t}</span>
             <input
               type="text"
+              enterKeyHint="done"
               value={draft[t] ?? ''}
               placeholder={builtIn[t] || '(directory itself)'}
               disabled={readOnly}

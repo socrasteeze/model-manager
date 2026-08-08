@@ -135,6 +135,7 @@ export function PreviewEditor({ sha, previews, onChanged }: {
               src={previewURL(p.thumb_sha256 || p.image_sha256)}
               alt=""
               loading="lazy"
+              decoding="async"
               width={p.width || undefined}
               height={p.height || undefined}
             />
