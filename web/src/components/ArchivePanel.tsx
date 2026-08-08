@@ -114,6 +114,7 @@ export function ArchivePanel() {
         <div className="root-add">
           <input
             type="text"
+            inputMode="numeric"
             placeholder="Civitai model id"
             value={modelID}
             onChange={(e) => setModelID(e.target.value)}
@@ -194,13 +195,18 @@ export function ArchivePanel() {
                   )}
                   {a.last_error && <div className="hint">{a.last_error}</div>}
                 </td>
-                <td>{a.file_ok ? 'yes' : 'no'}</td>
-                <td>{a.meta_ok ? 'yes' : 'no'}</td>
-                <td>{a.origin_cache_ok ? 'yes' : 'no'}</td>
-                <td>
+                {/* data-label carries the column heading into the cell, which
+                    is what lets each row collapse into a labelled card on a
+                    phone -- six columns of unbreakable headings cannot fit a
+                    375px screen, and scrolling them sideways would separate
+                    each flag from the model it describes. */}
+                <td data-label="File">{a.file_ok ? 'yes' : 'no'}</td>
+                <td data-label="Metadata">{a.meta_ok ? 'yes' : 'no'}</td>
+                <td data-label="Responses">{a.origin_cache_ok ? 'yes' : 'no'}</td>
+                <td data-label="Previews">
                   {a.previews_got}/{a.previews_total}
                 </td>
-                <td>
+                <td data-label="">
                   {!archiveComplete(a) && status?.available && (
                     <button
                       className="ghost"

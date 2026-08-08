@@ -430,13 +430,17 @@ export function ModelDetailPanel({ sha, onClose, onChanged }: Props) {
                 <div className="candidate-field">{c.field}</div>
                 <div className="candidate-entry winner">
                   <span className={`tier tier-${c.winner.tier_name}`}>{c.winner.tier_name}</span>
-                  <code>{JSON.stringify(c.winner.value)}</code>
+                  {/* trimJSON, as the suggestions list already does. A raw
+                      stringify of a description field is the whole description
+                      on one line, which buried the tier and source this row
+                      exists to show. */}
+                  <code title={JSON.stringify(c.winner.value)}>{trimJSON(JSON.stringify(c.winner.value))}</code>
                   <span className="src">{c.winner.source}</span>
                 </div>
                 {c.losers?.map((l, i) => (
                   <div key={i} className="candidate-entry loser">
                     <span className={`tier tier-${l.tier_name}`}>{l.tier_name}</span>
-                    <code>{JSON.stringify(l.value)}</code>
+                    <code title={JSON.stringify(l.value)}>{trimJSON(JSON.stringify(l.value))}</code>
                     <span className="src">{l.source}</span>
                   </div>
                 ))}

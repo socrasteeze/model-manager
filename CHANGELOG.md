@@ -9,10 +9,34 @@ Every entry links to the full release notes for that version.
 
 ### Fixed
 
-- On a phone, the library could be scrolled sideways into empty space. A sweep
-  that reported an error showed it verbatim, and an origin URL carries an
-  unbroken 64-character hash with nowhere to wrap, so the line set the width of
-  the whole page. Server-provided text now breaks anywhere it has to.
+- Every page could be scrolled sideways into empty space on a phone. Three
+  causes, each repeated in several places: text the server produced had nowhere
+  to wrap (an origin URL carries an unbroken 64-character hash, a detected root
+  is a whole path), a `<select>` is sized by its longest option and several are
+  filled with filesystem roots, and the Settings tab had no scroll container of
+  its own so anything too wide inside it widened the whole application.
+- Tapping any text field zoomed the view in and never zoomed back out. Every
+  input, textarea and select in the app computed below the 16px that iOS
+  requires to leave the page alone, and the fields on a model's detail panel
+  took focus the moment the row opened, so it happened without a tap.
+- The archive inventory is a six-column table that cannot fit a phone screen.
+  Each row now becomes a card, keeping every completeness flag beside the model
+  it describes rather than off the side of the screen.
+- The detail panel's close button sat under the status bar when the app was
+  installed to the Home Screen, and the filter drawer's last controls sat under
+  the home indicator where taps never arrive. Both now account for the notch.
+  The close button was also smaller than the minimum touch size, which mattered
+  more than usual: with no Escape key on a phone, it is the only way out.
+- Flicking past the end of a model's detail panel scrolled the library behind
+  it, so closing the panel left you somewhere else in the list.
+- The app now has a Home Screen icon. It was offered only as an SVG, which iOS
+  does not accept, so installing it produced a blank tile.
+- The star and cross on preview images are now worded. They had no visible
+  label and explained themselves only through a tooltip, which iOS never shows
+  — one of them detaches an image.
+- A model's provenance list showed each competing value as raw JSON on one
+  line, so a description buried the source and tier the row exists to show.
+- The status bar no longer stays dark when the app is in light mode.
 
 ## [v0.5.1](docs/release-notes/v0.5.1.md) — 2026-08-08
 

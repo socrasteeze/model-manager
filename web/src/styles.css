@@ -1588,3 +1588,297 @@ a.ghost {
   margin-top: 0.25rem;
   color: var(--warn);
 }
+
+/* ==========================================================================
+   Containment, touch and iOS
+   --------------------------------------------------------------------------
+   Everything below came from auditing the app at a 375px viewport and as an
+   installed iOS PWA. The rules are grouped by cause rather than by component,
+   because most of the breakage was three mistakes repeated in a dozen places
+   rather than a dozen unrelated bugs.
+   ========================================================================== */
+
+/* --- 1. Nothing may set the page width ---------------------------------- */
+
+/* A select is sized by its longest option, and as a flex item its default
+   min-width: auto turns that measurement into a floor no container can
+   override. Several of these are populated with filesystem roots, so
+   registering a model directory at a deep path silently widened the whole
+   application. .version-picker select was the only one that got this right;
+   making it global is what stops the next select regressing. */
+select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Settings was the one tab with no scroll container of its own. .results and
+   .browse both carry this, and .browse says why. Without it, anything too wide
+   inside Settings widened the document instead of scrolling locally, and took
+   the topbar with it -- which is what turned two local overflows into
+   application-wide ones. */
+.settings {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Text the server produced, rendered verbatim. None of it is guaranteed to
+   contain a break opportunity: an origin URL carries a 64-character hash, a
+   training config carries dataset paths, a detected root is a whole Windows or
+   UNC path. `anywhere` rather than `break-word` throughout, because only
+   `anywhere` reduces intrinsic min-content width -- and min-content is what a
+   flex or grid item is sized by, so `break-word` alone lets an element refuse
+   to shrink while looking like it should wrap. */
+.config-item { min-width: 0; }
+.config-item code { display: block; overflow-wrap: anywhere; }
+.archive-table code { overflow-wrap: anywhere; }
+.root-suggestions .chip {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+/* Two levels of flex, each defaulting to min-width: auto, wrapped around a
+   select whose options are root paths. Both levels have to be told they may
+   shrink, or the label floors at the longest path. */
+.dest-row label { min-width: 0; }
+.dest-row select,
+.setting-row select,
+.root-actions select {
+  min-width: 0;
+  max-width: 100%;
+}
+.setting-row select { flex: 1 1 auto; }
+.chip-row select { width: auto; }
+
+/* --- 2. Rows that have to be allowed to wrap ----------------------------- */
+
+/* The library toolbar. Idle it fits; with a sweep running it needs the sort
+   select, the progress bar and the run's status line on one row and does not.
+   The progress element is a fixed 160px, which no min-width on its parent can
+   reach -- the rule has to name the element itself. */
+.results-header { flex-wrap: wrap; }
+.results-header select { min-width: 0; }
+.enrich-progress progress {
+  width: 100%;
+  max-width: 160px;
+  min-width: 0;
+}
+
+.preview-actions { flex-wrap: wrap; }
+.scan-progress { flex-wrap: wrap; }
+.path-badges { flex-wrap: wrap; }
+
+/* A provenance value can be an entire model description as one JSON string.
+   Centring a fifty-line block against a one-line tier badge is what made the
+   candidates list unreadable rather than merely long. */
+.candidate-entry { align-items: flex-start; }
+
+/* --- 3. Touch and pointer ------------------------------------------------ */
+
+/* Scroll chaining: flicking past the end of the detail overlay scrolled the
+   library grid underneath it, so closing the panel left you somewhere else in
+   the list than where you opened it. */
+.detail,
+.sidebar,
+.results,
+.browse,
+.settings,
+.generated-grid {
+  overscroll-behavior: contain;
+}
+
+/* iOS paints a translucent grey rectangle on every tap and ignores
+   border-radius doing it -- on a card that is a full-tile grey wash, on a pill
+   a rectangle over a rounded shape. Replaced with a real pressed state, which
+   the app had no equivalent of: it styled :hover only, and on a touch device
+   :hover sticks after the tap instead of previewing it. */
+button,
+a,
+label,
+.chip,
+.card {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:active:not(:disabled),
+.chip:active,
+.card:active {
+  transform: scale(0.985);
+}
+
+/* A slightly long press on a card raised the iOS Save Image sheet instead of
+   opening the model, because the tile is a button wrapping an img. */
+.card,
+.card img,
+.preview-strip img,
+.chip,
+.tabs button {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+
+/* ==========================================================================
+   4. Phones and tablets
+   ========================================================================== */
+
+@media (max-width: 900px) {
+  /* iOS Safari zooms the viewport whenever a control with a computed
+     font-size below 16px takes focus, and it never zooms back out. The base
+     rule is `font: inherit` against a 14px body, so every control in the app
+     qualified -- and the ones inside EditableField are autoFocus, so they
+     zoomed the moment an edit row opened rather than waiting for a tap.
+
+     Declared against the classes as well as the elements, because several of
+     these set font-size on a wrapper and reach the control by inheritance,
+     where a bare element selector would lose on specificity. */
+  input,
+  select,
+  textarea,
+  .search,
+  .results-header select,
+  .browse-search input,
+  .chip-row select,
+  .dest-row select,
+  .version-picker select,
+  .setting-row input,
+  .setting-row select,
+  .folder-grid input,
+  .root-add input,
+  .root-actions select,
+  .render-panel input[type='text'],
+  .workflow-source select,
+  .workflow-source textarea {
+    font-size: 16px;
+  }
+
+  /* --- safe areas ------------------------------------------------------- */
+
+  /* Both overlays replace the topbar, which was the only element accounting
+     for the notch. In standalone there is no browser chrome, so without these
+     the detail panel's title and close button sit under the status bar, and
+     the drawer's last controls sit under the home indicator -- where iOS
+     reserves the strip for its own swipe and the taps never arrive. */
+  .detail {
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+  }
+
+  .sidebar {
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    padding-left: max(12px, env(safe-area-inset-left));
+  }
+
+  .topbar {
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+  }
+
+  /* --- touch targets ---------------------------------------------------- */
+
+  /* The detail overlay covers the tab bar and dismisses on Escape, which a
+     phone does not have. This button is genuinely the only way out, so it gets
+     the full 44pt rather than a compromise. */
+  .close {
+    width: 44px;
+    height: 44px;
+    top: max(12px, env(safe-area-inset-top));
+    right: max(12px, env(safe-area-inset-right));
+  }
+
+  /* The rest are glyphs inside dense rows, where a literal 44pt box would
+     overlap its neighbours and cause the mis-taps it is meant to prevent. They
+     get a smaller floor plus more room between them, which is the honest trade
+     for controls this size. */
+  .tag button,
+  .edit,
+  .preview-strip figcaption button,
+  .link,
+  .linklike {
+    min-width: 32px;
+    min-height: 32px;
+  }
+
+  .tag-list { gap: 10px; }
+  .preview-strip figcaption { gap: 8px; }
+
+  .tabs button,
+  .filter-toggle,
+  .browse-paging button,
+  .listing-actions button,
+  .listing-actions .ghost,
+  .root-actions button,
+  .root-actions select,
+  .root-footer button,
+  .preview-actions button,
+  .workflow-actions button {
+    min-height: 40px;
+  }
+
+  .check { padding: 7px 0; }
+
+  /* --- layout ----------------------------------------------------------- */
+
+  /* A fixed 130px label took 38% of the width and left the value wrapping in a
+     column too narrow to read. Stacked, both get the full width. */
+  .row {
+    flex-direction: column;
+    gap: 2px;
+  }
+  .row-label { width: auto; }
+
+  .hash-row { flex-wrap: wrap; }
+  .hash-row > span:first-child { width: auto; }
+
+  .scan-bar { flex-basis: 100%; }
+
+  /* One column rather than a 320px track minimum, which had 15px of slack at
+     375px and none at all on a 320px device. */
+  .listing-grid { grid-template-columns: 1fr; }
+
+  /* The archive inventory is six columns whose headers are single unbreakable
+     words, so its min-content is a hard floor about 150px wider than the
+     screen. A scroll container would contain it, but the point of the table is
+     reading the completeness flags against the model they belong to, and that
+     comparison is exactly what horizontal scrolling destroys. Each row becomes
+     a card instead, with the header text moved into each cell as data-label. */
+  .archive-table,
+  .archive-table tbody,
+  .archive-table tr,
+  .archive-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .archive-table thead { display: none; }
+
+  .archive-table tr {
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .archive-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.15rem 0;
+    border: none;
+  }
+
+  .archive-table td::before {
+    content: attr(data-label);
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex: 0 0 auto;
+  }
+
+  /* The first cell names the row, so it reads as a heading rather than as one
+     more labelled field. */
+  .archive-table td:first-child::before { display: none; }
+  .archive-table td:first-child { display: block; margin-bottom: 0.3rem; }
+}

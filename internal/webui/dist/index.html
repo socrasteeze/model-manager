@@ -3,14 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#11131a" />
+    <!-- The stylesheet ships a full light palette behind prefers-color-scheme,
+         so a single dark theme-color put a near-black status bar above a light
+         app. One tag per scheme instead. -->
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#11131a" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f7f9" />
     <meta name="color-scheme" content="dark light" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
-    <link rel="apple-touch-icon" href="/icon.svg" />
+    <!-- iOS does not accept SVG here and does not rasterise SVG manifest icons
+         for the Home Screen: with only the SVG it fell back to a generic tile.
+         The PNG is opaque because iOS composites transparency to black. -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/icon-180.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <title>Model Manager</title>
-    <script type="module" crossorigin src="/assets/index-BNQRs36Q.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BloLlah6.css">
+    <script type="module" crossorigin src="/assets/index-B06-JOX_.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CES31vlK.css">
   </head>
   <body>
     <div id="root"></div>

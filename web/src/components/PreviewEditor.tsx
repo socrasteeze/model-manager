@@ -149,9 +149,14 @@ export function PreviewEditor({ sha, previews, onChanged }: {
                   workflow
                 </a>
               )}
+              {/* Worded, not glyphs. iOS never shows a title tooltip, so on a
+                  phone these were an unlabelled star and cross where one of
+                  them detaches an image -- the meaning was reachable only with
+                  a mouse. */}
               {editable && i > 0 && (
                 <button
                   disabled={busy}
+                  aria-label="Make this the thumbnail"
                   title="Make this the thumbnail"
                   onClick={() =>
                     run(() =>
@@ -162,17 +167,18 @@ export function PreviewEditor({ sha, previews, onChanged }: {
                     )
                   }
                 >
-                  ★
+                  cover
                 </button>
               )}
               {editable && (
                 <button
                   className="danger"
                   disabled={busy}
+                  aria-label="Detach this image (the file on disk is untouched)"
                   title="Detach this image (the file on disk is untouched)"
                   onClick={() => run(() => deletePreview(sha, p.image_sha256))}
                 >
-                  ×
+                  detach
                 </button>
               )}
             </figcaption>

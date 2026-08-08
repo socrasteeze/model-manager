@@ -9,6 +9,18 @@ interface Props {
   onSave: (value: string | null) => void
 }
 
+// Focusing a control on open is right with a keyboard and wrong on a phone.
+// These rows live inside the detail panel, which is position: fixed at ≤900px;
+// iOS raises the keyboard and scrolls the visual viewport to reveal the caret,
+// but a fixed ancestor does not move with it, so the panel slides partly
+// off-screen and its close button -- the only way out, since there is no
+// Escape key -- goes with it. Coarse pointers open the field and wait to be
+// tapped instead.
+const autoFocusOnOpen =
+  typeof window === 'undefined' || !window.matchMedia
+    ? true
+    : !window.matchMedia('(hover: none) and (pointer: coarse)').matches
+
 export function EditableField({ label, value, editable, multiline, options, onSave }: Props) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(value ?? '')
@@ -45,7 +57,7 @@ export function EditableField({ label, value, editable, multiline, options, onSa
       <span className="row-label">{label}</span>
       <div className="row-value">
         {options ? (
-          <select value={draft} onChange={(e) => setDraft(e.target.value)} autoFocus>
+          <select value={draft} onChange={(e) => setDraft(e.target.value)} autoFocus={autoFocusOnOpen}>
             <option value="">(not set)</option>
             {options.map((o) => (
               <option key={o} value={o}>
@@ -54,7 +66,7 @@ export function EditableField({ label, value, editable, multiline, options, onSa
             ))}
           </select>
         ) : multiline ? (
-          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} autoFocus />
+          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} autoFocus={autoFocusOnOpen} />
         ) : (
           <input
             value={draft}
@@ -66,7 +78,7 @@ export function EditableField({ label, value, editable, multiline, options, onSa
                 setEditing(false)
               }
             }}
-            autoFocus
+            autoFocus={autoFocusOnOpen}
           />
         )}
         <div className="edit-actions">
