@@ -46,11 +46,14 @@ and what that measurably costs.
 
 ## Install
 
-**Current release: [v0.5.0](../../releases/tag/v0.5.0)** — one library, several
-machines: a second copy can browse and pull from the first, reclaim the space
-again afterwards, and the machine holding the collection can archive from the
-providers well enough to outlive them. See its
-[release notes](docs/release-notes/v0.5.0.md); nothing needs running by hand.
+**Current release: [v0.5.1](../../releases/tag/v0.5.1)** — the machine holding
+the collection can now run as a container and update itself from GitHub with one
+command, on a NAS that has no git. The daemon is unchanged from
+[v0.5.0](docs/release-notes/v0.5.0.md), which is the release that made one
+library usable from several machines: a second copy can browse and pull from the
+first, reclaim the space again afterwards, and the machine holding the
+collection can archive from the providers well enough to outlive them. See the
+[v0.5.1 notes](docs/release-notes/v0.5.1.md); nothing needs running by hand.
 
 Download the binary for your platform from the
 [latest release](../../releases/latest) — one file, nothing to install. Windows

@@ -5,7 +5,10 @@ list internal refactors with no visible effect.
 
 Every entry links to the full release notes for that version.
 
-## [Unreleased]
+## [v0.5.1](docs/release-notes/v0.5.1.md) — 2026-08-08
+
+The daemon itself is unchanged from v0.5.0; everything here is deployment
+tooling around it.
 
 ### Added
 
@@ -20,6 +23,26 @@ Every entry links to the full release notes for that version.
 - Shell and batch files now have their line endings pinned, so a deployment
   script cannot reach a NAS with the carriage returns that make `/bin/sh` refuse
   to run it.
+- The container uses host networking, so the daemon sees the real client
+  address. Under Docker's default bridge, every request arrives from the bridge
+  gateway, which silently defeats `--tailnet` — a tailnet client got a token
+  prompt it should have been exempt from, and the only way to exempt it would
+  have exempted the whole LAN too.
+- A second model directory is optional and off by default. Every mounted root is
+  somewhere the daemon may write, so pointing one at a folder another tool prunes
+  would let that tool delete what this one archived.
+
+### Fixed
+
+- The deploy directory is no longer `$HOME/model-manager`, which is where a
+  working checkout of the same project tends to live and which the update
+  replaces wholesale. It also refuses to run if it finds a git checkout there.
+- Docker is resolved by path rather than trusting `PATH`. On a NAS the engine is
+  often only on a login shell's `PATH`, so the remote trigger — which is not a
+  login shell — could not find it.
+- The updater now hands over to its newly installed copy in the same run. A
+  change to how the container is started used to take two invocations to apply,
+  and the first reported success while ignoring the change it had just fetched.
 
 ## [v0.5.0](docs/release-notes/v0.5.0.md) — 2026-08-07
 
