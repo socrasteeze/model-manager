@@ -5,6 +5,15 @@ list internal refactors with no visible effect.
 
 Every entry links to the full release notes for that version.
 
+## [Unreleased]
+
+### Fixed
+
+- On a phone, the library could be scrolled sideways into empty space. A sweep
+  that reported an error showed it verbatim, and an origin URL carries an
+  unbroken 64-character hash with nowhere to wrap, so the line set the width of
+  the whole page. Server-provided text now breaks anywhere it has to.
+
 ## [v0.5.1](docs/release-notes/v0.5.1.md) — 2026-08-08
 
 The daemon itself is unchanged from v0.5.0; everything here is deployment
